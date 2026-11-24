@@ -54,9 +54,12 @@ targets = Counter(r[3] for r in rows)
 
 os.makedirs(os.path.dirname(out), exist_ok=True)
 with open(out, "w", encoding="utf-8") as f:
-    f.write("# 342 个 @State 逐条归属表\n\n")
+    f.write("# Index.ets 的 @State 现状盘点\n\n")
     f.write("> 由 " + BT + "scripts/gen-state-plan.py" + BT + " 生成，勿手工编辑。源 " + BT + "pages/Index.ets" + BT + "\n")
     f.write("> 改规则请改脚本再重新生成，不要直接编辑本表。\n\n")
+    f.write("> **用途说明**：本表是存量盘点，用于评估 Index.ets 的规模与可拆分边界，**不是迁移清单**。\n")
+    f.write("> 按 docs/ARCHITECTURE.md 第七.4 的结论，存量 @State 不动；本表供将来收尾时评估工作量。\n")
+    f.write("> 新状态一律进 @ObservedV2 单例 Store，见 docs/arch/GOVERNANCE.md。\n\n")
     f.write("实测匹配总数：**" + str(len(rows)) + " 个**\n\n")
     f.write("## 分派汇总\n\n| 处置 | 条数 |\n| --- | --- |\n")
     for k, v in buckets.most_common():

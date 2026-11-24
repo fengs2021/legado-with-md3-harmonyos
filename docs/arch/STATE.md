@@ -1,7 +1,11 @@
-# 342 个 @State 逐条归属表
+# Index.ets 的 @State 现状盘点
 
 > 由 `scripts/gen-state-plan.py` 生成，勿手工编辑。源 `pages/Index.ets`
 > 改规则请改脚本再重新生成，不要直接编辑本表。
+
+> **用途说明**：本表是存量盘点，用于评估 Index.ets 的规模与可拆分边界，**不是迁移清单**。
+> 按 docs/ARCHITECTURE.md 第七.4 的结论，存量 @State 不动；本表供将来收尾时评估工作量。
+> 新状态一律进 @ObservedV2 单例 Store，见 docs/arch/GOVERNANCE.md。
 
 实测匹配总数：**335 个**
 
