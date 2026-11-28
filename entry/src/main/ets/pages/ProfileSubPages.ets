@@ -5,6 +5,8 @@ import { bundleManager } from '@kit.AbilityKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { fileIo, picker } from '@kit.CoreFileKit';
 import { SourceHttp } from '../bookSource/SourceHttp';
+import { WantLauncher } from '../lib/WantLauncher';
+import { common } from '@kit.AbilityKit';
 import { BookSourceImporter } from '../data/BookSourceImporter';
 import { BookSourceImportKeep } from '../data/BookSourceRepository';
 import { AppGlyph, AppGlyphName } from '../components/AppGlyph';
@@ -7504,8 +7506,8 @@ export struct AboutAppPage {
           }.width('100%').padding({ top: 4, bottom: 8 }).alignItems(HorizontalAlign.Center)
 
           Row() {
-            AboutQuickAction({ icon: 'about_web', description: '项目主页', onSelect: () => this.onUnavailableAction('项目主页尚未接入外部链接') })
-            AboutQuickAction({ icon: 'about_github', description: 'GitHub', onSelect: () => this.onUnavailableAction('GitHub 尚未接入外部链接') })
+            AboutQuickAction({ icon: 'about_web', description: '项目主页', onSelect: () => this.openExternalLink('https://github.com/hbxs0571/legado-with-md3-harmonyos') })
+            AboutQuickAction({ icon: 'about_github', description: 'GitHub', onSelect: () => this.openExternalLink('https://github.com/hbxs0571/legado-with-md3-harmonyos') })
             AboutQuickAction({ icon: 'about_update', description: '检查更新', onSelect: () => this.onUnavailableAction('更新检查尚未迁移') })
           }.width('100%').padding({ left: 12, right: 12, bottom: 8 })
 
@@ -7521,6 +7523,20 @@ export struct AboutAppPage {
         }.padding({ left: 16, right: 16, top: 4, bottom: 18 })
       }.edgeEffect(EdgeEffect.Spring, { alwaysEnabled: false }).layoutWeight(1).scrollBar(BarState.Off).onScroll(() => this.updateHeader())
     }.width('100%').height('100%').backgroundColor(this.themeAppBackground.length > 0 ? Color.Transparent : (this.themePureBlack ? '#000000' : this.themeColorSurfacePrimary))
+  }
+
+  /**
+   * 打开外部链接。上游 `ui/about/AboutFragment.kt:74-80` 的 `openUrl(R.string.repo_url)`
+   * 走 ACTION_VIEW；本地对应 `ohos.want.action.viewData`，统一收在 `lib/WantLauncher`。
+   * 没有可用浏览器时如实提示，不假装已经打开。
+   */
+  private openExternalLink(url: string): void {
+    const context = this.getUIContext().getHostContext();
+    WantLauncher.openUrl(context as common.UIAbilityContext, url).then((opened: boolean) => {
+      if (!opened) {
+        this.onUnavailableAction('没有可用的浏览器打开：' + url);
+      }
+    });
   }
 }
 
