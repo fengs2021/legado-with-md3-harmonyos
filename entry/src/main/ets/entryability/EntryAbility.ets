@@ -12,6 +12,7 @@ import { BookSourceRuntimeStore } from '@legado/sourceengine';
 import { BookSourceRuntimePersistenceImpl } from '../bookSource/BookSourceRuntimePersistenceImpl';
 import { OnlineBookService } from '../bookSource/OnlineBookService';
 import { ChapterDownloadQueue } from '../bookSource/ChapterDownloadQueue';
+import { AppLog } from '../lib/AppLog';
 import { CrashHandler } from '../lib/CrashHandler';
 
 /**
@@ -72,6 +73,12 @@ function applySystemBar(context: Context, isDark: boolean): void {
 
 export default class EntryAbility extends UIAbility {
   onCreate(): void {
+    // 日志落盘：AppLog 只存内存，进程被杀之后闪退现场什么都留不下。
+    // attach 必须在任何业务日志之前调用，目录用 filesDir。
+    AppLog.attach(this.context.filesDir);
+    // 开机自检行：app.log 里能看到这一行，就说明落盘链路是通的；
+    // 之后任何一次「拉日志是空的」都能立刻区分是 attach/写盘坏了，还是业务本来没记日志。
+    AppLog.put('[Boot] onCreate filesDir=' + this.context.filesDir);
     // 安装书源引擎的运行时持久化：引擎自己不开库，登录态与书源读取都经这里。
     // 仓储缓存此时可能还没 load（首屏才 load），但 getBookSource 走 getAll 是同步快照，
     // 首次调用发生在用户点搜索之后，那时缓存已就绪。

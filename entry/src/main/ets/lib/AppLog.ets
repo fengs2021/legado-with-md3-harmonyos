@@ -12,6 +12,8 @@
  *
  * 另补 `putDebug`（上游 AppLog.kt:66-70）：受「记录日志」开关门控，供调试类日志使用。
  */
+import { fileIo } from '@kit.CoreFileKit';
+import hilog from '@ohos.hilog';
 import { OtherSettingsRepository } from '../data/OtherSettingsRepository';
 
 /** 一条日志。字段与上游 Triple<Long, String, Throwable?> 一一对应。 */
@@ -42,6 +44,16 @@ export class AppLog {
   private static readonly limit: number = 100;
   /** 头插、最新在最前，与上游 `mLogs.add(0, ...)`（AppLog.kt:38）一致。 */
   private static entries: AppLogEntry[] = [];
+  /**
+   * 落盘目录（EntryAbility.onCreate 里 attach）；空串表示只走内存。
+   *
+   * 上游 Android 不落盘是因为它的日志有 Logcat + 崩溃上报兜底；鸿蒙这边进程被杀之后
+   * 内存缓冲什么都不剩，`hdc hilog` 也只能看到还在打的那一段，闪退现场就没法取证了。
+   * 所以这里加一个文件出口：不改变内存语义，只是把同样的行再写一份到 filesDir/app.log。
+   */
+  private static filesDir: string = '';
+  /** 单个日志文件上限，超过时砍掉前半段（滚动），避免沙箱被日志撑爆。 */
+  private static readonly MAX_FILE_BYTES: number = 512 * 1024;
 
   /**
    * 追加一条日志。
@@ -55,7 +67,58 @@ export class AppLog {
     if (AppLog.entries.length > AppLog.limit) {
       AppLog.entries.pop();
     }
-    AppLog.entries.unshift(new AppLogEntry(Date.now(), message, AppLog.stackText(throwable)));
+    const entry = new AppLogEntry(Date.now(), message, AppLog.stackText(throwable));
+    AppLog.entries.unshift(entry);
+    AppLog.appendFile(entry);
+  }
+
+  /** 绑定沙箱目录：attach 之前只写内存。 */
+  static attach(filesDir: string): void {
+    AppLog.filesDir = filesDir;
+  }
+
+  /**
+   * 落盘一条日志 + 镜像到 hilog。
+   *
+   * 失败一律静默：日志本身绝不能影响业务。写字符串而不是 TextEncoder 出来的字节——
+   * 后者在 API 26 上实测写不进任何字节（文件存在、内容为空）。
+   */
+  private static appendFile(entry: AppLogEntry): void {
+    const line = AppLog.formatTime(entry.timestamp) + ' ' + entry.content();
+    try {
+      hilog.info(0x0001, 'AppLog', '%{public}s', line);
+    } catch (_) {
+    }
+    if (AppLog.filesDir.length === 0) {
+      return;
+    }
+    const path = `${AppLog.filesDir}/app.log`;
+    try {
+      try {
+        if (fileIo.statSync(path).size > AppLog.MAX_FILE_BYTES) {
+          const raw = fileIo.readTextSync(path);
+          const tail = raw.substring(Math.floor(raw.length / 2));
+          const writer = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY
+            | fileIo.OpenMode.TRUNC);
+          try {
+            fileIo.writeSync(writer.fd, '[truncated]\n' + tail);
+          } finally {
+            fileIo.closeSync(writer);
+          }
+        }
+      } catch (_) {
+        // 文件还不存在：正常
+      }
+      const file = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE
+        | fileIo.OpenMode.APPEND);
+      try {
+        fileIo.writeSync(file.fd, line + '\n');
+      } finally {
+        fileIo.closeSync(file);
+      }
+    } catch (_) {
+      // 落盘失败不影响业务
+    }
   }
 
   /**
