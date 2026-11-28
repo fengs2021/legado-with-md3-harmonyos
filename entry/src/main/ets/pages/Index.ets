@@ -10767,6 +10767,67 @@ private canWriteInto(dir: string): boolean {
    * 的 refresh 分支）。本地只支持在线书：先删该章 `.nb` 缓存，再走 `loadChapters` 重拉目录
    * 定位到同一章，最后 `readChapter` 取新正文。
    */
+  /**
+   * 刷新整本目录（上游 ReadBookViewModel.kt:218-283 loadChapterList）。
+   *
+   * 与「刷新本章」（重抓当前章正文）不同：这里走 TocRefreshUseCase —— 它已按上游十步写好
+   * （取目录 → 回写计数 → 同步库行 → 删旧章 → 写新章），书架的手动刷新用的也是它。
+   * 成功后只就地改内存书行的计数，不替换 selectedBook 引用（它是 ReaderPage 的 @Prop，
+   * 换引用会重跑阅读器初始化）。
+   */
+  private async refreshReaderToc(): Promise<void> {
+    const book: Book | undefined = this.selectedBook;
+    if (book === undefined) {
+      return;
+    }
+    if (!BookRepository.isOnlineBook(book)) {
+      this.showUnavailableAction('刷新目录只对在线书籍有效');
+      return;
+    }
+    const context = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      return;
+    }
+    try {
+      const outcome: TocRefreshOutcome = await TocRefreshUseCase.execute(
+        context, BookRepository.bookUrlOf(book));
+      const chapters = outcome.chapters;
+      book.chapterCount = String(chapters.length);
+      book.lastCheckTime = Date.now();
+      if (chapters.length > 0) {
+        book.latestChapterTitle = chapters[chapters.length - 1].title;
+      }
+      this.showUnavailableAction('目录已刷新：共 ' + chapters.length + ' 章');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `${error}`;
+      this.showUnavailableAction('刷新目录失败：' + message);
+    }
+  }
+
+  /**
+   * 「刷新后续」：清掉当前章之后的正文缓存，再刷新目录（上游 MenuRefreshAfter）。
+   * 用途是「后面几十章作者改过，重下」。当前章本身不动，阅读位置也不动。
+   */
+  private async refreshReaderAfterChapter(): Promise<void> {
+    const book: Book | undefined = this.selectedBook;
+    if (book === undefined) {
+      return;
+    }
+    if (!BookRepository.isOnlineBook(book)) {
+      this.showUnavailableAction('刷新后续只对在线书籍有效');
+      return;
+    }
+    const chapters: BookChapter[] = BookRepository.cachedChapters(book);
+    const index: number = Math.max(0, book.chapterIndex ?? 0);
+    let cleared = 0;
+    for (let i = index + 1; i < chapters.length; i++) {
+      BookRepository.deleteOnlineChapterCache(book, chapters[i]);
+      cleared++;
+    }
+    AppLog.put('[Reader] 刷新后续：清除 ' + cleared + ' 章缓存');
+    await this.refreshReaderToc();
+  }
+
   private async refreshReaderCurrentChapter(): Promise<void> {
     const book: Book | undefined = this.selectedBook;
     if (book === undefined) {
@@ -12682,7 +12743,8 @@ private canWriteInto(dir: string): boolean {
             onOpenChangeSource: () => { this.changeSourceBook = this.selectedBook; },
             onOpenChapterChangeSource: () => this.showUnavailableAction('更换本章源尚未迁移：本地没有单章换源面板'),
             onRefreshCurrentChapter: () => { void this.refreshReaderCurrentChapter(); },
-            onRefreshAfterChapter: () => this.showUnavailableAction('刷新后续尚未迁移：本地只能刷新当前章'),
+            onRefreshToc: () => { void this.refreshReaderToc(); },
+            onRefreshAfterChapter: () => { void this.refreshReaderAfterChapter(); },
             onToggleNightMode: () => this.toggleReaderNightMode(),
             onToggleEyeProtection: () => this.toggleEyeProtection(),
             onMoreActionsChange: (actions: ReaderMoreActionConfig[]) => this.setReaderMoreActions(actions),
