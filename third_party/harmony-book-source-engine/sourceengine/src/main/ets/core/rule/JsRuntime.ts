@@ -176,6 +176,14 @@ export class JsRuntime {
         const quickValue = QuickJsScriptRuntime.evaluateResidualExpression(expr, this.vars, 150);
         if (quickValue.success) return quickValue.value;
       }
+      // 残留的 java 网络调用（ajax/connect/post/put/head/delete/patch）在同步替换层求不出来，
+      // QuickJS 沙箱里也没有 java 对象，最终会**原样当字符串返回**（调用方拿到 "java.ajax('…')" 字面量）。
+      // 这种静默降级在真机上只表现为「正文/书名变成一串代码」，查不到原因，所以这里留可统计的痕迹。
+      const residualJava = expr.match(/java\.(?:ajax|ajaxAll|connect|post|put|head|delete|patch)\b/);
+      if (residualJava !== null) {
+        console.warn('[JsRuntime] unsupported java call ' + residualJava[0] +
+          ' expr=' + expr.substring(0, 80));
+      }
       if (/^[\d\s+\-*/%.()eE]+$/.test(expr)) {
         return String(this.evalNumber(expr));
       }
