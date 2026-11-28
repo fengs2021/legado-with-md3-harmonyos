@@ -173,3 +173,20 @@ grep -rn UnavailableAction --include=*.ets . | grep -E 尚未迁移\|尚未接�
 | pages/OnboardingPage.ets:88/90/92 | 引导页 WebDAV 服务器 / 账号 / 密码三个输入框被禁用 |
 
 这 4 处要么接上功能，要么改成可点击并弹原因。
+
+## 五、本轮已接线（2026-11-28 晚，书源链路）
+
+阅读页菜单里这 5 项从「弹未迁移」改成真执行，`migrated` 一并翻成 true：
+
+| 菜单项 | 落到哪 | 证据 |
+| --- | --- | --- |
+| 换源 | `Index.changeSourceBook` → `ChangeSourceSheet`（与长按二级菜单同入口） | `ReaderPage.selectMoreAction` |
+| 刷新章节 | `TocRefreshUseCase.execute`（上游 `ReadBookViewModel.loadChapterList`） | 真机 `app.log`：`[Toc] start → ok count=992 ms=3918` |
+| 离线缓存 | `ChapterDownloadQueue.enqueue(book, 全部章节)`，队列自己跳过已缓存章 | `ReaderPage.downloadCurrentBook` |
+| 刷新后续 | 清当前章之后的 `.nb` 缓存 + 刷目录 | `Index.refreshReaderAfterChapter` |
+| 日志 | `AppLog.getAll()` 日志面板（与书架页/详情页同一形态） | `ReaderPage.readerLogSheet` |
+| 本书翻页动画 | 二级菜单六档单选早已实现，本轮只改标记 | `ReaderPage:593` 注释同段 |
+
+仍在「未迁移」且**确实做不到或没接**：听书下载（本地 TTS 引擎是桩，见 `readaloud/SystemTtsApi`）、
+更换本章源（无单章换源面板）、AI 对话、拉取/覆盖云端进度、书源登录/购买/编辑源/禁用源、书源自定义按钮。
+
