@@ -2196,7 +2196,22 @@ static saveImportedBooks(context: Context, books: Book[]): Promise<void> {
     const ranges: number[][] = [];
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
-      ranges.push([row?.start ?? 0, row?.end ?? 0]);
+      let start: number = row?.start ?? 0;
+      let end: number = row?.end ?? 0;
+      // 卷首/前言这类章常常只落了一半边界（有 start 没 end，甚至两个都没有），
+      // 旧实现直接给 [start, 0] → seek 读到空串 → 调用方回退「整本读」，
+      // 几 MB 的书于是被整体读进内存再整本语义解析（真机 7.6MB 书直接 THREAD_BLOCK_3S）。
+      // 缺 end 就用下一章的 start 兜底，缺 start 就用 0，保证区间至少是非空的一段。
+      if (end <= start) {
+        for (let next = index + 1; next < rows.length; next++) {
+          const nextStart: number | undefined = rows[next]?.start;
+          if (nextStart !== undefined && nextStart > start) {
+            end = nextStart;
+            break;
+          }
+        }
+      }
+      ranges.push([start, end]);
     }
     if (BookRepository.chapterCharRanges.size >= BookRepository.CHAPTER_RANGE_CACHE_LIMIT) {
       const oldest: string | undefined = BookRepository.chapterCharRanges.keys().next().value as string | undefined;
@@ -2405,12 +2420,27 @@ static saveImportedBooks(context: Context, books: Book[]): Promise<void> {
     // 偏移口径：charset 显式时用它；为空时落库按 UTF-8 折算，须确认文件真是 UTF-8。
     const seekEncoding = explicitEncoding.length > 0 ? explicitEncoding : 'utf-8';
     const canSeek = explicitEncoding.length > 0 || BookRepository.fileIsUtf8(book.contentPath as string);
+    // 判据从「第 0 章必须有 start」放宽成「任意一章有偏移」：
+    // 前言/卷首章的边界可能缺失，但其余章齐全时仍然可以正常 seek；
+    // 旧判据会让这类书每次都整本读（大文件直接卡死）。
+    const hasAnyOffset: boolean = seedRows.some((row: BookChapter) =>
+      row.start !== undefined || row.end !== undefined);
     if (contentOverride === undefined && canSeek &&
-      seedRows.length > 0 && seedRows[0]?.start !== undefined) {
+      seedRows.length > 0 && hasAnyOffset) {
       const key = `${book.contentPath}|${encoding ?? ''}`;
       const ranges = BookRepository.chapterByteRanges(key, seedRows);
       const seekIndex = BookRepository.resolveChapterIndex(seedRows, chapterTitle, requestedChapterIndex, book);
       const range = ranges[seekIndex];
+      // 单章区间上限兜底：分章异常时一章可能就是整本（7.6MB → 260 万字），
+      // 直接把整本读进内存再整本语义解析会卡死主线程。这里硬性截断，
+      // 宁可在极端书上少显示一截，也不能让应用无响应。
+      if (range !== undefined && range[1] - range[0] > 300000) {
+        range[1] = range[0] + 300000;
+      }
+      console.info('[RB] rc canSeek=1 enc=' + (explicitEncoding.length > 0 ? explicitEncoding : 'auto') +
+        ' rows=' + seedRows.length + ' s0=' + (seedRows[0]?.start ?? -1) + ' e0=' + (seedRows[0]?.end ?? -1) +
+        ' s1=' + (seedRows[1]?.start ?? -1) + ' idx=' + seekIndex +
+        ' range=' + (range === undefined ? 'none' : range[0] + '-' + range[1]));
       if (range !== undefined) {
         content = BookRepository.readChapterRange(book.contentPath as string, seekEncoding,
           range[0], range[1]);
@@ -2421,6 +2451,8 @@ static saveImportedBooks(context: Context, books: Book[]): Promise<void> {
       }
     }
     if (!seeked && content.length === 0) {
+      console.info('[RB] rc fallbackFullRead canSeek=' + (canSeek ? 1 : 0) + ' rows=' + seedRows.length +
+        ' len=' + content.length);
       content = contentOverride ?? BookRepository.readBookContent(book.contentPath, encoding);
     }
     // 性能观测打点：验收要对比同书连读里取正文那段耗时，seek 命中后应显著下降。
@@ -3295,6 +3327,22 @@ private static getNoTocBodyOffsets(content: string, starts: number[], count: num
       chapterTitles = layout.titles;
       chapterOffsets = layout.offsets;
       chapterVolumes = [];
+    } else if (chapterOffsets.length > 0 && content.length > 0) {
+      // 分章粒度兜底：规则命中但切出来的章太少（真机 7.6MB 书只切出 4 章、第 0 章覆盖全书），
+      // 单章就成了几十万字，打开时整章进内存再整本语义解析 → THREAD_BLOCK_3S 卡死。
+      // 平均每章超过 2 万字就按「无目录」那套长度切分重切，保证单章可承受。
+      const averageChars = content.length / chapterOffsets.length;
+      if (averageChars > 20000) {
+        const layout = BookRepository.buildNoTocChapterLayout(content, maxLengthWithNoToc, charset);
+        if (layout.titles.length > chapterTitles.length) {
+          console.info('[ReaderBench] chapterResplit from=' + chapterTitles.length +
+            ' to=' + layout.titles.length + ' avgChars=' + Math.round(averageChars));
+          chapterTitles = layout.titles;
+          chapterOffsets = layout.offsets;
+          chapterVolumes = [];
+          streamedSplit = undefined;
+        }
+      }
     }
     const safeChapterIndex = Math.max(0, Math.min(chapterTitles.length - 1, chapterIndex));
     const safeChapterProgress = Math.max(0, Math.min(100, chapterProgress));

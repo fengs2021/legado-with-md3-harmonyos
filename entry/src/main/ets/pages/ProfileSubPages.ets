@@ -1565,7 +1565,7 @@ export struct BookSourceManagePage {
         }.width('100%').margin({ top: 18 })
       } else {
         Text('导入选项').fontSize(TITLE_LARGE).fontWeight(FontWeight.Medium).fontColor(this.themeColorTextPrimary)
-        Text(`解析到 ${this.pendingImportRules.length} 条书源，选择保留项后导入。`)
+        Text(`解析到 ${this.pendingImportRules.length} 条书源。三个保留项只对「同地址已存在」的书源生效；首次导入按文件内容直接写入。`)
           .fontSize(LABEL_MEDIUM).fontColor(this.themeColorTextTertiary).margin({ top: 10 })
         Column() {
           this.ImportToggleRow('保留原名', this.keepName, (v: boolean) => { this.keepName = v; })

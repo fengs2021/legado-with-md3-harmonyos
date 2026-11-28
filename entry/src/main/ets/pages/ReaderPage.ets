@@ -2864,11 +2864,13 @@ export struct ReaderPage {
     const paragraphSpacing = baseLineHeight * this.paragraphSpacing / 10;
     // 只有图片尺寸到齐时，语义解析与高亮匹配的输入完全没变，直接复用上一轮结果。
     // 复用的前提是上一轮真的解析过（paragraphs 非空），否则退回全量。
+    console.info('[RB] enter len=' + this.content.length + ' w=' + Math.round(this.readerContentWidth) + ' vh=' + Math.round(this.viewportHeight));
     const semanticsStartedAt = Date.now();
     const reuseSemantic = onlyImageSizesChanged && this.localSemanticDocument.paragraphs.length > 0;
     const document = reuseSemantic
       ? this.localSemanticDocument
       : LocalTextSemantics.parse(this.content, this.paragraphIndent, this.adaptSpecialStyle);
+    console.info('[RB] parsed chars=' + document.content.length + ' paras=' + document.paragraphs.length);
     if (!reuseSemantic) {
       this.localSemanticContent = document.content;
       const nextRanges = ReaderHighlightRuleEngine.findBodyRanges(
@@ -2925,6 +2927,7 @@ export struct ReaderPage {
       '|body=' + this.contentFingerprint(this.content));
     const cachedPages = ReaderChapterPageCache.get(paginationCacheKey);
     const paginateStartedAt = Date.now();
+    console.info('[RB] beforePaginate len=' + this.content.length + ' cached=' + (cachedPages === undefined ? 0 : 1));
     // 流式分页（#1013）：只在「没有缓存页」且「正文够长」时走。短章同步排完比起一轮
     // 异步更快（8000 字约 16 页，是同步排开始肉眼可见的门槛）；缓存命中时本来就不用排。
     if (cachedPages === undefined && this.content.length > 8000) {
@@ -5238,117 +5241,57 @@ export struct ReaderPage {
   }
 
   private async paginateFullBookPages(key: string, generation: number): Promise<void> {
-    console.info(`[ReaderBench] fullBookPagination started gen=${generation}`);
-    const context = this.getUIContext();
-    const measureUtils = context.getMeasureUtils();
-    const fontSize = this.fontSize * 1.05;
-    const width = this.getBodyContentWidth();
-    const baseLineHeight = ReaderFontRepository.measureLineHeight(context, this.readerBodyFontFamily, fontSize);
-    const lineHeight = Math.max(1, baseLineHeight * this.lineSpacing / 10);
-    const infoHeaderReserve = this.isReaderHeaderVisible() ? this.getReaderInfoReserve(true) : 0;
-    const infoFooterReserve = this.isReaderFooterVisible() ? this.getReaderInfoReserve(false) : 0;
-    const pageHeight = Math.max(lineHeight, this.getBodyContentHeight(infoHeaderReserve, infoFooterReserve));
-    const paragraphSpacing = baseLineHeight * this.paragraphSpacing / 10;
-    const imageSizes = new Map<string, ReaderIntrinsicImageSize>(this.imageSizes);
-    const glyphWidths = new Map<string, number>();
-    let scannedGlyphCount = 0;
-    let measuredGlyphCount = 0;
-    const yieldToUi = async (): Promise<void> => {
-      await new Promise<void>((resolve: () => void) => setTimeout(resolve, 0));
-    };
-    const cacheGlyphWidths = async (text: string): Promise<void> => {
-      let cursor = 0;
-      while (cursor < text.length) {
-        const codePoint = text.codePointAt(cursor);
-        const nextCursor = cursor + (codePoint !== undefined && codePoint > 0xFFFF ? 2 : 1);
-        const glyph = text.substring(cursor, nextCursor);
-        if (!glyphWidths.has(glyph)) {
-          const width = ReaderFontRepository.measureTextWidth(
-            context, glyph, this.readerBodyFontFamily, fontSize, this.getReaderFontWeight());
-          glyphWidths.set(glyph, width + this.getReaderLetterSpacingVp(fontSize));
-          measuredGlyphCount++;
-          if (measuredGlyphCount % 8 === 0) { await yieldToUi(); }
-        }
-        cursor = nextCursor;
-        scannedGlyphCount++;
-        if (scannedGlyphCount % 512 === 0) { await yieldToUi(); }
-      }
-    };
-    const cacheDocumentGlyphWidths = async (document: LocalSemanticDocument): Promise<void> => {
-      for (let paragraphIndex = 0; paragraphIndex < document.paragraphs.length; paragraphIndex++) {
-        const paragraph = document.paragraphs[paragraphIndex];
-        if (paragraph === undefined) { continue; }
-        for (let partIndex = 0; partIndex < paragraph.parts.length; partIndex++) {
-          const part = paragraph.parts[partIndex];
-          if (part?.kind === 'text') { await cacheGlyphWidths(part.value); }
-        }
-        if (paragraphIndex % 8 === 7) { await yieldToUi(); }
-      }
-    };
-    const measureFromGlyphCache = (text: string): number => {
-      let totalWidth = 0;
-      let cursor = 0;
-      while (cursor < text.length) {
-        const codePoint = text.codePointAt(cursor);
-        const nextCursor = cursor + (codePoint !== undefined && codePoint > 0xFFFF ? 2 : 1);
-        totalWidth += glyphWidths.get(text.substring(cursor, nextCursor)) ?? 0;
-        cursor = nextCursor;
-      }
-      return totalWidth;
-    };
-    const inlineImageWidth = ReaderFontRepository.measureTextWidth(
-      context, '袮', this.readerBodyFontFamily, fontSize, this.getReaderFontWeight()) +
-      this.getReaderLetterSpacingVp(fontSize);
-    const pageCounts: number[] = [];
-    await BookRepository.forEachChapter(this.book, async (
-      chapterContent: string,
-      chapterIndex: number
-    ): Promise<boolean> => {
-      // 切到滚动模式后逐章检查一次，及时打断已在跑的全书分页（沿用现有循环返回，不另造取消机制）。
-      if (this.effectivePageAnim() === 3 || generation !== this.fullBookPaginationGeneration ||
-        key !== this.getFullBookPaginationLayoutKey()) {
-        return false;
-      }
-      const chapterRows = BookRepository.cachedChapters(this.book);
-      const rawTitle = chapterRows[chapterIndex]?.title ??
-        (chapterIndex === this.getChapterIndex() ? this.chapterTitle : '');
-      const displayTitle = await ReplaceRuleRepository.applyTitle(this.book, rawTitle);
-      const document = LocalTextSemantics.parse(chapterContent, this.paragraphIndent, this.adaptSpecialStyle);
-      await cacheDocumentGlyphWidths(document);
-      await this.loadImageSizesForDocument(document, imageSizes);
-      const titleBlock = this.buildReaderTitleBlock(context, width, lineHeight,
-        document.content.length, this.effectiveImageStyle() === 'SINGLE', displayTitle);
-      const pageCount = chapterIndex === this.getChapterIndex() && this.localReaderPages.length > 0
-        ? this.currentChapterPageCount()
-        : await LocalReaderPaginator.countPagesIncrementally(
-          document,
-          width,
-          pageHeight,
-          lineHeight,
-          paragraphSpacing,
-          (text: string): number => measureFromGlyphCache(text),
-          imageSizes,
-          this.effectiveImageStyle(),
-          context.px2vp(80),
-          inlineImageWidth,
-          // 标题已进块流，首屏不再预留行。
-          0,
-          this.resolveReaderColumnCount(),
-          this.readerSizeOffsets,
-          titleBlock,
-          // 与当页排版同一套样式，否则全书画布页数会和实际翻页数对不上。
-          this.buildReaderTextLayoutStyle(fontSize)
-        );
-      // 标题页已由分页器的 titlePageBreakAfter 产出，不再额外 +1。
-      pageCounts.push(pageCount);
-      return true;
-    });
-    const expectedChapterCount = Math.max(1, BookRepository.cachedChapterTitles(this.book).length);
-    if (generation === this.fullBookPaginationGeneration && key === this.getFullBookPaginationLayoutKey() &&
-      pageCounts.length === expectedChapterCount) {
-      this.fullBookPageCounts = pageCounts;
-      this.fullBookPaginationReady = true;
+    // 大 txt 卡死的根因就在这里：旧实现把整本书逐章 parse + 精确分页
+    // （765 章的 2.6MB 书要跑好几分钟），即使每 8 个字形 yield 一次，
+    // 累计几百万次测量也会把主线程长期占住，界面表现为卡死。
+    // 页脚/进度条需要的只是「全书页数」这个参考值，因此改为：
+    //   · 当前章已经精确分过页，用它实测出「每页字符数」；
+    //   · 其余章节按字节偏移折算字符数，再除以每页字符数；
+    // 复杂度从 O(全书字数) 降到 O(章数)，与文件大小基本无关。
+    const chapters = BookRepository.cachedChapters(this.book);
+    const chapterCount = chapters.length;
+    if (chapterCount === 0) {
+      return;
     }
+    const currentPages = this.currentChapterPageCount();
+    const currentChars = this.localSemanticContent.length;
+    if (currentPages <= 0 || currentChars <= 0) {
+      // 当前章还没排好：不猜，等下一次触发（requestFullBookPagination 会在排版后重跑）
+      return;
+    }
+    const charsPerPage = Math.max(1, currentChars / currentPages);
+    const counts: number[] = [];
+    for (let index = 0; index < chapterCount; index++) {
+      const chapter = chapters[index];
+      const start = chapter.start;
+      const end = chapter.end;
+      let chars = currentChars;
+      if (start !== undefined && end !== undefined && end > start) {
+        // start/end 是 UTF-8 字节偏移；中文约 3 字节/字，英文 1 字节/字。
+        // 这里用当前章的「字节/字符」比折算，比写死 3 更贴近本书实际编码。
+        chars = Math.max(1, Math.round((end - start) / this.fullBookBytesPerChar));
+      }
+      counts.push(Math.max(1, Math.ceil(chars / charsPerPage)));
+    }
+    if (generation === this.fullBookPaginationGeneration && key === this.getFullBookPaginationLayoutKey()) {
+      this.fullBookPageCounts = counts;
+      this.fullBookPaginationReady = true;
+      console.info('[ReaderBench] fullBookPagination estimated chapters=' + chapterCount +
+        ' charsPerPage=' + Math.round(charsPerPage) + ' totalPages=' + this.getWholeBookPageCount());
+    }
+  }
+
+  /** 当前章的「UTF-8 字节数 / 字符数」比，供全书页数估算把字节偏移折成字符数 */
+  private get fullBookBytesPerChar(): number {
+    const chapter = BookRepository.cachedChapters(this.book)[this.getChapterIndex()];
+    if (chapter !== undefined && chapter.start !== undefined && chapter.end !== undefined &&
+      chapter.end > chapter.start && this.localSemanticContent.length > 0) {
+      const ratio = (chapter.end - chapter.start) / this.localSemanticContent.length;
+      if (ratio > 0.5 && ratio < 8) {
+        return ratio;
+      }
+    }
+    return 3;
   }
 
   private async loadImageSizesForDocument(

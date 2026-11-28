@@ -1,5 +1,5 @@
 import { fileIo } from '@kit.CoreFileKit';
-import { pdfService } from '@kit.PDFKit';
+import { PdfDocumentStub as PdfDocument, PdfParseResult } from './PdfServiceStub';
 import image from '@ohos.multimedia.image';
 import { Book } from '../model/Book';
 
@@ -131,14 +131,14 @@ export class PdfRepository {
   /** 渲完所有页并落盘；返回页数。loadDocument 只调一次，releaseDocument 放 finally。 */
   private static async renderPages(pdfPath: string, pagesDirectory: string,
     coverPath: string): Promise<number> {
-    const doc = new pdfService.PdfDocument();
+    const doc = new PdfDocument();
     try {
       const parsed = doc.loadDocument(pdfPath);
-      if (parsed === pdfService.ParseResult.PARSE_ERROR_PASSWORD) {
+      if (parsed === PdfParseResult.PARSE_ERROR_PASSWORD) {
         // 与上游同路：加密就失败，不弹密码框。
         throw new Error('这本 PDF 有打开密码，暂不支持');
       }
-      if (parsed !== pdfService.ParseResult.PARSE_SUCCESS) {
+      if (parsed !== PdfParseResult.PARSE_SUCCESS) {
         throw new Error('PDF 文件损坏或格式不受支持');
       }
       const pageCount = doc.getPageCount();

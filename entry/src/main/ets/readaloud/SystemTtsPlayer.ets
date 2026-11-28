@@ -1,4 +1,4 @@
-import { textToSpeech } from '@kit.CoreSpeechKit';
+import { CreateEngineParams, SpeakParams, SpeechListener, TextToSpeechEngine, createEngine } from './SystemTtsApi';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { SpeechUnit } from './SpeechSegmenter';
 import { HttpTtsPlayer } from './HttpTtsPlayer';
@@ -48,8 +48,8 @@ const BUSY_RETRY_DELAY_MS: number = 500;
 export class SystemTtsPlayer {
   private static instance: SystemTtsPlayer | null = null;
 
-  private engine: textToSpeech.TextToSpeechEngine | null = null;
-  private engineCreating: Promise<textToSpeech.TextToSpeechEngine> | null = null;
+  private engine: TextToSpeechEngine | null = null;
+  private engineCreating: Promise<TextToSpeechEngine> | null = null;
   private units: SpeechUnit[] = [];
   private index: number = 0;
   private stateValue: ReadAloudState = ReadAloudState.IDLE;
@@ -386,11 +386,11 @@ export class SystemTtsPlayer {
     const myGeneration = this.generation;
     const requestId = `ra-${Date.now()}-${this.requestSeq++}`;
     this.activeRequestId = requestId;
-    const doSpeak = (engine: textToSpeech.TextToSpeechEngine): void => {
+    const doSpeak = (engine: TextToSpeechEngine): void => {
       if (this.generation !== myGeneration || this.stateValue !== ReadAloudState.PLAYING) {
         return;
       }
-      const params: textToSpeech.SpeakParams = { requestId: requestId };
+      const params: SpeakParams = { requestId: requestId };
       console.info(`[ReadAloud] speak start idx=${this.index} len=${chunk.length} rid=${requestId}`);
       try {
         engine.speak(chunk, params);
@@ -502,7 +502,7 @@ export class SystemTtsPlayer {
   }
 
   /** 单例持有引擎；创建中的 Promise 共享，避免并发 createEngine 撞 3 实例上限。 */
-  private ensureEngine(): Promise<textToSpeech.TextToSpeechEngine> {
+  private ensureEngine(): Promise<TextToSpeechEngine> {
     if (this.engine !== null) {
       return Promise.resolve(this.engine);
     }
@@ -510,11 +510,11 @@ export class SystemTtsPlayer {
       return this.engineCreating;
     }
     console.info('[ReadAloud] createEngine begin');
-    const creating = textToSpeech.createEngine({
+    const creating = createEngine({
       language: 'zh-CN',
       person: this.voicePerson,
       online: 1
-    }).then((engine: textToSpeech.TextToSpeechEngine): textToSpeech.TextToSpeechEngine => {
+    }).then((engine: TextToSpeechEngine): TextToSpeechEngine => {
       this.engine = engine;
       this.engineCreating = null;
       engine.setListener({
@@ -534,7 +534,7 @@ export class SystemTtsPlayer {
       });
       console.info('[ReadAloud] createEngine OK');
       return engine;
-    }).catch((error: BusinessError): Promise<textToSpeech.TextToSpeechEngine> => {
+    }).catch((error: BusinessError): Promise<TextToSpeechEngine> => {
       this.engineCreating = null;
       // ArkTS 不允许 throw 任意类型；转成 Error 再抛，调用侧 catch 已按 BusinessError.code 判忙。
       const wrapped = new Error(error.message ?? 'createEngine failed');

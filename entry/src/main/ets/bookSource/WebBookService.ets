@@ -52,8 +52,32 @@ export class WebBookService {
     const resp = fetched.resp;
     const base = fetched.base;
     const rule = WebBookService.newRule(resp.body, base, keyword, page);
-    const elements = rule.getElements(sr.bookList);
-    if (elements.length === 0) return [];
+
+    // 上游 BookList.kt:62-81：searchUrl 命中 bookUrlPattern 说明搜索直接落到了详情页，
+    // 这时把当前页当「一本书」解析，而不是去找列表。
+    if (source.bookUrlPattern.length > 0 && WebBookService.matchesUrlPattern(base, source.bookUrlPattern)) {
+      const single = WebBookService.parseInfoItem(source, resp.body, base, base, keyword, page);
+      return single === null ? [] : [single];
+    }
+
+    // 上游 BookList.kt:89-96：bookList 规则的 '-' 前缀表示倒序，'+' 是显式正序。
+    let listRule: string = sr.bookList;
+    let reverse: boolean = false;
+    if (listRule.startsWith('-')) {
+      reverse = true;
+      listRule = listRule.substring(1);
+    } else if (listRule.startsWith('+')) {
+      listRule = listRule.substring(1);
+    }
+    const elements = rule.getElements(listRule);
+    if (elements.length === 0) {
+      // 上游 BookList.kt:100-107：列表为空且源没配 bookUrlPattern 时，按详情页解析整页。
+      if (source.bookUrlPattern.length === 0) {
+        const single = WebBookService.parseInfoItem(source, resp.body, base, base, keyword, page);
+        return single === null ? [] : [single];
+      }
+      return [];
+    }
     // 防止整页被当成一条（规则写错时常见）：单条且几乎等于整页视为规则失败。
     if (elements.length === 1 && resp.body.length > 1000 && elements[0].length >= resp.body.length * 0.9) {
       throw new Error('getElements 把整页当结果');
@@ -79,7 +103,55 @@ export class WebBookService {
       if (item.coverUrl) item.coverUrl = BookUrlResolver.resolve(item.coverUrl, base);
       items.push(item);
     }
+    if (reverse) {
+      items.reverse();
+    }
     return items;
+  }
+
+  /** bookUrlPattern 匹配（上游用 Kotlin Regex.matches 全串匹配语义）。 */
+  private static matchesUrlPattern(url: string, pattern: string): boolean {
+    try {
+      const re: RegExp = new RegExp('^(?:' + pattern + ')$');
+      return re.test(url);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * 把一页当作「一本书」解析，对齐上游 BookList.kt:100-120 的 getInfoItem：
+   * 搜索结果落到详情页、或列表规则匹配不到时，用 ruleSearch 的字段规则在这张页面上取值。
+   */
+  private static parseInfoItem(source: BookSource, body: string, base: string, bookUrl: string,
+    keyword: string, page: number): SearchBookItem | null {
+    try {
+      const r: AnalyzeRule = WebBookService.newRule(body, base, keyword, page);
+      const sr = source.searchRule;
+      const item: SearchBookItem = {
+        bookUrl: bookUrl,
+        origin: source.bookSourceUrl,
+        originName: source.bookSourceName,
+        name: r.getString(sr.name),
+        author: r.getString(sr.author),
+        kind: r.getString(sr.kind),
+        coverUrl: r.getString(sr.coverUrl, true),
+        intro: r.getString(sr.intro),
+        lastChapter: r.getString(sr.lastChapter),
+        wordCount: r.getString(sr.wordCount),
+        updateTime: r.getString(sr.updateTime),
+        tocUrl: ''
+      };
+      if (item.name.length === 0) {
+        return null;
+      }
+      if (item.coverUrl.length > 0) {
+        item.coverUrl = BookUrlResolver.resolve(item.coverUrl, base);
+      }
+      return item;
+    } catch (_) {
+      return null;
+    }
   }
 
   /**
@@ -97,7 +169,16 @@ export class WebBookService {
     const resp = fetched.resp;
     const base = fetched.base;
     const rule = WebBookService.newRule(resp.body, base, '', page);
-    const elements = rule.getElements(er.bookList);
+    // 上游 BookList.kt:89-96 同一套 BookListRule 前缀语义：'-' 倒序、'+' 显式正序。
+    let listRule: string = er.bookList;
+    let reverse: boolean = false;
+    if (listRule.startsWith('-')) {
+      reverse = true;
+      listRule = listRule.substring(1);
+    } else if (listRule.startsWith('+')) {
+      listRule = listRule.substring(1);
+    }
+    const elements = rule.getElements(listRule);
     if (elements.length === 0) return [];
     if (elements.length === 1 && resp.body.length > 1000 && elements[0].length >= resp.body.length * 0.9) {
       throw new Error('getElements 把整页当结果');
@@ -123,38 +204,80 @@ export class WebBookService {
       if (item.coverUrl) item.coverUrl = BookUrlResolver.resolve(item.coverUrl, base);
       items.push(item);
     }
+    if (reverse) {
+      items.reverse();
+    }
     return items;
   }
 
-  /** 第二步：详情。取详情页 → 跑 init → 逐字段取值。 */
+  /**
+   * 第二步：详情。逐字段对照上游 `model/webBook/BookInfo.kt:47-160 analyzeBookInfo`：
+   *   · init 是「先按规则取元素、再把内容替换成该元素」，不是 getString（上游 :57-65）；
+   *   · kind 用 getStringList 再 join(",")，单个 getString 会丢掉多分类（上游 :82-90）；
+   *   · coverUrl 以**重定向后的地址**为基准拼绝对路径（上游 :133-137 用 redirectUrl）；
+   *   · tocUrl 为空回落到 bookUrl（上游 :141-143）；
+   *   · 每个字段独立 try/catch，一个字段规则写坏不影响其余字段（上游逐字段 runCatching 口径）。
+   */
   static async getBookInfo(source: BookSource, bookUrl: string): Promise<RemoteBookDetail> {
     const ir = source.bookInfoRule;
     const fetched = await WebBookService.fetch(source, bookUrl, '', 1);
     const resp = fetched.resp;
     const base = fetched.base;
-    // init 规则可能触发额外请求/赋值；引擎在 AnalyzeRule 内按 @js: 处理，这里先求值再取字段。
-    const initRule = WebBookService.newRule(resp.body, base, '', 1);
-    if (ir.init) {
-      try { initRule.getString(ir.init); } catch (_) { /* init 失败不阻断其余字段 */ }
+    const finalUrl: string = (resp.finalUrl !== undefined && resp.finalUrl.length > 0)
+      ? resp.finalUrl : bookUrl;
+
+    // init：取元素 → 用该元素当正文（上游 analyzeRule.setContent(analyzeRule.getElement(it))）
+    let body: string = resp.body;
+    if (ir.init !== undefined && ir.init.length > 0) {
+      try {
+        const initElements: string[] = WebBookService.newRule(body, base, '', 1).getElements(ir.init);
+        if (initElements.length > 0 && initElements[0].length > 0) {
+          body = initElements[0];
+        }
+      } catch (_) {
+        // init 失败不阻断其余字段（上游同口径）
+      }
     }
-    const r = WebBookService.newRule(resp.body, base, '', 1);
+    const r: AnalyzeRule = WebBookService.newRule(body, base, '', 1);
+    const text = (rule: string, isUrl: boolean = false): string => {
+      if (rule.length === 0) {
+        return '';
+      }
+      try {
+        return r.getString(rule, isUrl);
+      } catch (_) {
+        return '';
+      }
+    };
+
+    let kindText: string = '';
+    if (ir.kind.length > 0) {
+      try {
+        const kinds: string[] = r.getStringList(ir.kind);
+        kindText = kinds.length > 0 ? kinds.join(',') : '';
+      } catch (_) {
+        kindText = '';
+      }
+    }
+
     const detail: RemoteBookDetail = {
       bookUrl: bookUrl,
       origin: source.bookSourceUrl,
       originName: source.bookSourceName,
-      name: r.getString(ir.name),
-      author: r.getString(ir.author),
-      kind: r.getString(ir.kind),
-      coverUrl: r.getString(ir.coverUrl, true),
-      intro: r.getString(ir.intro),
-      lastChapter: r.getString(ir.lastChapter),
-      wordCount: r.getString(ir.wordCount),
-      updateTime: r.getString(ir.updateTime),
-      tocUrl: r.getString(ir.tocUrl, true)
+      name: text(ir.name),
+      author: text(ir.author),
+      kind: kindText,
+      coverUrl: text(ir.coverUrl, true),
+      intro: text(ir.intro),
+      lastChapter: text(ir.lastChapter),
+      wordCount: text(ir.wordCount),
+      updateTime: text(ir.updateTime),
+      tocUrl: text(ir.tocUrl, true)
     };
-    if (detail.coverUrl) detail.coverUrl = BookUrlResolver.resolve(detail.coverUrl, base);
-    // 上游口径：tocUrl 为空时用 bookUrl 本身当目录地址。
-    detail.tocUrl = detail.tocUrl
+    if (detail.coverUrl.length > 0) {
+      detail.coverUrl = BookUrlResolver.resolve(detail.coverUrl, finalUrl);
+    }
+    detail.tocUrl = detail.tocUrl.length > 0
       ? BookUrlResolver.resolve(detail.tocUrl, base)
       : bookUrl;
     return detail;
@@ -178,6 +301,17 @@ export class WebBookService {
         AppLog.put(`执行preUpdateJs规则失败 书源:${source.bookSourceUrl} ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+    // 上游 BookChapterList.kt:57-66：chapterList 规则前缀决定排序方向 ——
+    // '-' 开头表示目录是倒序的（解析完要 reverse），'+' 开头是显式正序（仅剥掉前缀）。
+    // 少了这一步，倒序源的目录会整本反过来（第 1 章变最后一章）。
+    let listRule: string = tr.chapterList;
+    let reverse: boolean = false;
+    if (listRule.startsWith('-')) {
+      reverse = true;
+      listRule = listRule.substring(1);
+    } else if (listRule.startsWith('+')) {
+      listRule = listRule.substring(1);
+    }
     const chapters: RemoteChapter[] = [];
     let currentUrl = tocUrl;
     let page = 0;
@@ -186,11 +320,11 @@ export class WebBookService {
       const resp = fetched.resp;
       const base = fetched.base;
       const rule = WebBookService.newRule(resp.body, base, '', 1);
-      const elements = rule.getElements(tr.chapterList);
+      const elements = rule.getElements(listRule);
       for (const element of elements) {
         const er = WebBookService.newRule(element, base, '', 1);
         const rawTitle = er.getString(tr.chapterName);
-        const url = BookUrlResolver.resolve(er.getString(tr.chapterUrl, true), base);
+        let url = BookUrlResolver.resolve(er.getString(tr.chapterUrl, true), base);
         // 批3（r359）：卷标题判定（上游 BookChapterList.kt:231-243）。
         // 规则为空时 false；求值结果按上游 String.isTrue() 口径判真假（空串/「null」/false/no/0 为假）。
         let isVolume = false;
@@ -217,11 +351,29 @@ export class WebBookService {
             AppLog.put(`格式化标题出错 书源:${source.bookSourceUrl} ${e instanceof Error ? e.message : String(e)}`);
           }
         }
+        // 上游 BookChapterList.kt:262-283：
+        //  · url 取不到时兜底（卷行用「标题+序号」，普通行用 baseUrl），否则该章点开必然 404；
+        //  · 标题为空的行整条丢弃（占位/分隔行不该进目录）。
+        if (url.length === 0) {
+          url = isVolume ? (title + String(chapters.length)) : base;
+        }
+        if (title.length === 0) {
+          continue;
+        }
+        // VIP/付费标记按上游 String.isTrue() 口径判真假：用 Boolean(字符串) 会把 "false" 也当真。
+        let isVip: boolean = false;
+        let isPay: boolean = false;
+        if (tr.isVip !== undefined && tr.isVip.length > 0) {
+          try { isVip = WebBookService.ruleIsTrue(er.getString(tr.isVip)); } catch (_) { isVip = false; }
+        }
+        if (tr.isPay !== undefined && tr.isPay.length > 0) {
+          try { isPay = WebBookService.ruleIsTrue(er.getString(tr.isPay)); } catch (_) { isPay = false; }
+        }
         chapters.push({
           url: url,
           title: title,
-          isVip: Boolean(er.getString(tr.isVip)),
-          isPay: Boolean(er.getString(tr.isPay)),
+          isVip: isVip,
+          isPay: isPay,
           isVolume: isVolume
         });
       }
@@ -233,6 +385,10 @@ export class WebBookService {
       if (!next) break;
       currentUrl = BookUrlResolver.resolve(next, base);
       if (chapters.length > 5000) break; // 防御：坏规则导致无限翻页
+    }
+    // 规则以 '-' 开头 = 源站目录是倒序的，这里翻回来（上游 BookChapterList.kt:57-66）
+    if (reverse) {
+      chapters.reverse();
     }
     return chapters;
   }
@@ -252,14 +408,49 @@ export class WebBookService {
    * replaceRegex 由 AnalyzeRule.getStringList 内的 ## 处理器承担，无需再做一遍。
    * 任务书 6.4 坑 3：ruleContent.webJs / subContent 引擎没有，有这些字段的源返回部分结果。
    */
+  /**
+   * 第四步：正文。对照上游 `model/webBook/BookContent.kt:52-110` 与 `WebBook.kt:467-476`：
+   *   · 正文规则为空时，把**章节链接本身**当正文返回（有一类源的 chapterUrl 就是正文文本）；
+   *   · 按 `ruleContent.nextContentUrl`（上游 nextPageUrl）续页，逐页拼接，已访问地址去重；
+   *   · 每页仍走 getStringList(content)，`##` 替接由引擎处理。
+   * 上游的并发多页（mapAsync threadCount）这里保守走串行：正文页数通常 1–3 页，
+   * 串行既避免并发打爆书源，也不会让结果顺序错乱。
+   */
   static async getContent(source: BookSource, chapterUrl: string): Promise<string> {
     const cr = source.contentRule;
-    if (!cr.content) throw new Error('源缺少 ruleContent.content');
-    const fetched = await WebBookService.fetch(source, chapterUrl, '', 1);
-    const resp = fetched.resp;
-    const base = fetched.base;
-    const rule = WebBookService.newRule(resp.body, base, '', 1);
-    const parts = rule.getStringList(cr.content);
-    return parts.join('\n').trim();
+    if (cr.content.length === 0) {
+      AppLog.put('[Content] rule empty, fallback to chapter url');
+      return chapterUrl;
+    }
+    const segments: string[] = [];
+    const visited: string[] = [];
+    let currentUrl: string = chapterUrl;
+    let guard: number = 0;
+    while (currentUrl.length > 0 && visited.indexOf(currentUrl) < 0 && guard < 20) {
+      visited.push(currentUrl);
+      guard += 1;
+      const fetched = await WebBookService.fetch(source, currentUrl, '', 1);
+      const resp = fetched.resp;
+      const base = fetched.base;
+      const rule = WebBookService.newRule(resp.body, base, '', 1);
+      const text = rule.getStringList(cr.content).join('\n').trim();
+      if (text.length > 0) {
+        segments.push(text);
+      }
+      if (cr.nextContentUrl.length === 0) {
+        break;
+      }
+      let next: string = '';
+      try {
+        next = rule.getString(cr.nextContentUrl, true);
+      } catch (_) {
+        break;
+      }
+      if (next.length === 0) {
+        break;
+      }
+      currentUrl = BookUrlResolver.resolve(next, base);
+    }
+    return segments.join('\n').trim();
   }
 }

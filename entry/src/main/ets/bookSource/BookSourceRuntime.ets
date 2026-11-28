@@ -83,17 +83,69 @@ export class BookSourceRuntime {
     return WebBookService.getBookInfo(src, bookUrl);
   }
 
-  /** 目录。 */
+  /** 在线目录硬上限：超长目录只保留前 N 章，避免一次性建几十万节点把主线程拖死。 */
+  private static readonly MAX_TOC_CHAPTERS: number = 5000;
+
+  /**
+   * 在途目录请求去重，照搬上游 WebBook.kt:chapterListJobs（putIfAbsent + 复用 await）。
+   * 上游用 ConcurrentHashMap<key, Job> 合并同一本书的并发取目录：详情页、阅读器、
+   * 目录页可能同时触发一次 toc，没有去重就会对同一个书源并发跑三遍解析
+   * （quickjs + 网络 + 上千章对象），真机上就是「点一下卡住再闪退」的典型成因。
+   */
+  private static tocInFlight: Map<string, Promise<RemoteChapter[]>> = new Map<string, Promise<RemoteChapter[]>>();
+
+  /** 目录入口：先按「书源 + 目录地址」合并并发请求（上游 chapterListJobs 口径）。 */
   static async toc(sourceUrl: string, bookUrl: string, tocUrl: string): Promise<RemoteChapter[]> {
-    const src = BookSourceRuntime.resolveSource(sourceUrl);
-    if (src === null) throw new Error('书源不存在：' + sourceUrl);
-    return WebBookService.getChapterList(src, tocUrl || bookUrl);
+    const key = sourceUrl + '|' + (tocUrl || bookUrl);
+    const running = BookSourceRuntime.tocInFlight.get(key);
+    if (running !== undefined) {
+      AppLog.put('[Toc] join in-flight ' + key);
+      return running;
+    }
+    const job = BookSourceRuntime.tocOnce(sourceUrl, bookUrl, tocUrl);
+    BookSourceRuntime.tocInFlight.set(key, job);
+    try {
+      return await job;
+    } finally {
+      BookSourceRuntime.tocInFlight.delete(key);
+    }
   }
 
-  /** 正文。 */
+  /** 真正的取目录。耗时与条数落 AppLog（闪退后也能从日志文件看到走到哪一步）。 */
+  private static async tocOnce(sourceUrl: string, bookUrl: string, tocUrl: string): Promise<RemoteChapter[]> {
+    const src = BookSourceRuntime.resolveSource(sourceUrl);
+    if (src === null) throw new Error('书源不存在：' + sourceUrl);
+    const t0 = Date.now();
+    AppLog.put('[Toc] start source=' + (src.bookSourceName || sourceUrl) + ' url=' + (tocUrl || bookUrl));
+    try {
+      const all = await WebBookService.getChapterList(src, tocUrl || bookUrl);
+      let list: RemoteChapter[] = all;
+      if (all.length > BookSourceRuntime.MAX_TOC_CHAPTERS) {
+        list = all.slice(0, BookSourceRuntime.MAX_TOC_CHAPTERS);
+        AppLog.put('[Toc] truncated from ' + all.length + ' to ' + list.length);
+      }
+      AppLog.put('[Toc] ok count=' + list.length + ' ms=' + (Date.now() - t0));
+      return list;
+    } catch (e) {
+      const message: string = e instanceof Error ? e.message : String(e);
+      AppLog.put('[Toc] fail ms=' + (Date.now() - t0) + ' ' + message);
+      throw new Error(message);
+    }
+  }
+
+  /** 正文。同样记耗时与长度。 */
   static async content(sourceUrl: string, chapterUrl: string): Promise<string> {
     const src = BookSourceRuntime.resolveSource(sourceUrl);
     if (src === null) throw new Error('书源不存在：' + sourceUrl);
-    return WebBookService.getContent(src, chapterUrl);
+    const t0 = Date.now();
+    try {
+      const text = await WebBookService.getContent(src, chapterUrl);
+      AppLog.put('[Content] ok len=' + text.length + ' ms=' + (Date.now() - t0));
+      return text;
+    } catch (e) {
+      const message: string = e instanceof Error ? e.message : String(e);
+      AppLog.put('[Content] fail ms=' + (Date.now() - t0) + ' ' + message);
+      throw new Error(message);
+    }
   }
 }

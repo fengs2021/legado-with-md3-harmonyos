@@ -175,6 +175,11 @@ export struct SearchPage {
   }
 
   private searchOnline(): void {
+    // 关键：在线结果视图由 sourceScope 分支决定（build 里 else-if (this.sourceScope)）。
+    // 旧实现只调 startOnlineSearch()，搜索确实跑了、结果也进了 onlineBooks，
+    // 但界面仍停在「本地书架」分支，用户看到的是「点了一点反应都没有」。
+    // 所以先切范围再搜；scope 变化本身也会触发一次搜索，两者由 onlineSearching 去重。
+    this.onSourceScopeChange(true);
     void this.startOnlineSearch();
   }
 
@@ -363,7 +368,7 @@ export struct SearchPage {
         } else {
           if (this.getResults().length === 0) {
             Column() {
-              SearchEmptyState({ title: '本地书架没有匹配结果', detail: '可调整书名或作者，在线书源搜索将在 P5 接入。' })
+              SearchEmptyState({ title: '本地书架没有匹配结果', detail: '可调整书名或作者；也可以点下方按钮搜索在线书源。' })
               Row() {
                 Text('搜索在线书源').fontSize(TITLE_MEDIUM).fontColor('#151720').fontWeight(FontWeight.Medium)
               }.justifyContent(FlexAlign.Center).padding({ left: 22, right: 22, top: 13, bottom: 13 })
@@ -576,7 +581,7 @@ struct SearchScopePanel {
           }.height(260).scrollBar(BarState.Off)
         } else {
           Column() {
-            SearchEmptyState({ title: '尚无可选书源', detail: '书源搜索将在 P5 接入。可以先打开书源管理页面。' })
+            SearchEmptyState({ title: '尚无可选书源', detail: '还没有选择用于搜索的书源，可以先到书源管理页导入并启用。' })
             Row() {
               Text('选择全部书源').fontSize(TITLE_MEDIUM).fontColor('#151720').fontWeight(FontWeight.Medium)
             }.justifyContent(FlexAlign.Center).padding({ left: 22, right: 22, top: 13, bottom: 13 })
