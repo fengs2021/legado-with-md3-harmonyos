@@ -335,10 +335,13 @@ export class BookRepository {
     'DELETE FROM `books` WHERE `bookUrl` = ?';
 
   /** 章节插入语句，18 列全部给值。 */
-  private static readonly insertChapterSql: string =
-    'INSERT OR REPLACE INTO `chapters` (`url`, `title`, `isVolume`, `tocLevel`, `baseUrl`, `bookUrl`, ' +
+  /** chapters 表的 18 个列（顺序即绑定值顺序）；列名必须带反引号——index 是 SQLite 关键字。 */
+  private static readonly chapterColumns: string =
+    '`url`, `title`, `isVolume`, `tocLevel`, `baseUrl`, `bookUrl`, ' +
     '`index`, `isVip`, `isPay`, `resourceUrl`, `tag`, `wordCount`, `start`, `end`, ' +
-    '`startFragmentId`, `endFragmentId`, `variable`, `reviewImg`) ' +
+    '`startFragmentId`, `endFragmentId`, `variable`, `reviewImg`';
+  private static readonly insertChapterSql: string =
+    'INSERT OR REPLACE INTO `chapters` (' + BookRepository.chapterColumns + ') ' +
     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 
   /**
@@ -1719,9 +1722,27 @@ static saveImportedBooks(context: Context, books: Book[]): Promise<void> {
     await store.beginTransaction();
     try {
       await store.executeSql(BookRepository.deleteChaptersByBookUrl, [bookUrl]);
-      for (let index = 0; index < chapters.length; index++) {
-        await store.executeSql(BookRepository.insertChapterSql,
-          BookRepository.toChapterArgs(bookUrl, chapters[index]));
+      // 多行 INSERT 批量写：一次 SQL 写 BATCH 章，1362 章从 1362 次往返降到 28 次。
+      //
+      // 不用 store.batchInsert：它按 ValuesBucket 的键拼 SQL 且不加反引号，
+      // 而 chapters 有个列叫 index（SQLite 关键字），拼出来 ...,index,... 直接报语法错
+      //（hilog: BatchInsert:statement is nullptr, table:chapters），插入无效且不抛异常。
+      // 这里自己拼占位符，列名带反引号，走 executeSql。
+      const BATCH = 50; // 50 × 18 = 900 个绑定值，低于 SQLite 999 参数上限
+      for (let offset = 0; offset < chapters.length; offset += BATCH) {
+        const end = Math.min(offset + BATCH, chapters.length);
+        const placeholders: string[] = [];
+        const args: relationalStore.ValueType[] = [];
+        for (let index = offset; index < end; index++) {
+          placeholders.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+          const rowArgs = BookRepository.toChapterArgs(bookUrl, chapters[index]);
+          for (let argIndex = 0; argIndex < rowArgs.length; argIndex++) {
+            args.push(rowArgs[argIndex]);
+          }
+        }
+        await store.executeSql(
+          'INSERT OR REPLACE INTO `chapters` (' + BookRepository.chapterColumns + ') VALUES ' +
+          placeholders.join(', '), args);
       }
       await store.commit();
     } catch (error) {
@@ -2151,7 +2172,7 @@ static saveImportedBooks(context: Context, books: Book[]): Promise<void> {
     return (book.isLocal ? media | 256 : media) | errorBit | notShelfBit;
   }
 
-  /** 章节行 18 个绑定值，顺序必须与 insertChapterSql 一致。 */
+  /** 章节行 18 个绑定值，顺序必须与 chapterColumns / insertChapterSql 一致。 */
   private static toChapterArgs(bookUrl: string, chapter: BookChapter): relationalStore.ValueType[] {
     return [
       chapter.url,
