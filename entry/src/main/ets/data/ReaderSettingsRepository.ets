@@ -660,9 +660,9 @@ export interface ReaderActionOption {
 
 // 按 Android ReadMenuActionIds 顺序保留完整配置池；执行状态由 ReaderPage 如实处理。
 export const READER_ACTION_OPTIONS: ReaderActionOption[] = [
-  { id: 'download', label: '离线缓存', scopeLabel: '仅网络书', migrated: false },
-  { id: 'refresh', label: '刷新', scopeLabel: '仅网络书', migrated: false },
-  { id: 'change_source', label: '换源', scopeLabel: '仅网络书', migrated: false },
+  { id: 'download', label: '离线缓存', scopeLabel: '仅网络书', migrated: true },
+  { id: 'refresh', label: '刷新', scopeLabel: '仅网络书', migrated: true },
+  { id: 'change_source', label: '换源', scopeLabel: '仅网络书', migrated: true },
   { id: 'audio_download', label: '听书下载', scopeLabel: '', migrated: false },
   { id: 'source_custom_button', label: '书源自定义按钮', scopeLabel: '仅支持该按钮的网络书', migrated: false },
   { id: 'toc_rule', label: 'TXT目录规则', scopeLabel: '仅本地TXT', migrated: false },
@@ -683,7 +683,7 @@ export const READER_ACTION_OPTIONS: ReaderActionOption[] = [
   { id: 'replace', label: '文本处理', scopeLabel: '', migrated: true },
   { id: 'replace_badge', label: '文本处理标记', scopeLabel: '', migrated: false },
   { id: 'translate', label: '翻译', scopeLabel: '', migrated: false },
-  { id: 'refresh_current', label: '刷新当前章节', scopeLabel: '', migrated: false },
+  { id: 'refresh_current', label: '刷新当前章节', scopeLabel: '', migrated: true },
   { id: 'multi_role_read', label: '多人朗读', scopeLabel: '', migrated: false },
   { id: 'multi_role_cast', label: '多人配音', scopeLabel: '', migrated: false },
   { id: 'cast_table', label: '配音表', scopeLabel: '', migrated: false },

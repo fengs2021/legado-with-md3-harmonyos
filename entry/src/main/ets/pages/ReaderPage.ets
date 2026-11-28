@@ -11,6 +11,7 @@ import { ReaderHighlightRuleSheet } from './ReaderHighlightRuleSheet';
 import { ReplaceRule } from '../model/ReplaceRule';
 import { ReplaceRuleRepository } from '../data/ReplaceRuleRepository';
 import { BookRepository } from '../data/BookRepository';
+import { ChapterDownloadQueue } from '../bookSource/ChapterDownloadQueue';
 import { BookContentProcessRepository } from '../data/BookContentProcessRepository';
 // 批5（:127）：快速标记面板要复用「上次样式」的解析（encodeStyle/decodeStyle 同一份口径）
 import { ReaderMarkingRepository } from '../data/ReaderMarkingRepository';
@@ -109,15 +110,15 @@ const READER_IMAGE_STYLE_OPTIONS: ReaderImageStyleOption[] = [
 const READER_MORE_ACTIONS: ReaderMoreAction[] = [
   { id: 'source_custom_button', label: '自定义按钮', glyph: 'profileSource', scopeLabel: '仅在线书籍', migrated: false },
   // 上游 MoreActionIds（ReadBookContract.kt:545-552）第 2-5 位：书源四项。
-  // 本地 book.isLocal 恒 true、书源引擎未接（见 isMoreActionApplicable），
-  // 所以它们只出现在配置面板里、带「未迁移」，永远不会成为格子。
+  // 书源引擎已接入（在线书 isLocal=false），但登录/购买/编辑源/禁用源四个动作还没接，
+  // 由 isMoreActionApplicable 挡在配置面板里并标「未迁移」。换源/刷新/离线缓存在下面已接。
   { id: 'source_login', label: '登录', glyph: 'profileWeb', scopeLabel: '仅在线书籍', migrated: false },
   { id: 'source_pay', label: '购买', glyph: 'profileSell', scopeLabel: '仅在线书籍', migrated: false },
   { id: 'edit_source', label: '编辑源', glyph: 'edit', scopeLabel: '仅在线书籍', migrated: false },
   { id: 'disable_source', label: '禁用源', glyph: 'lock', scopeLabel: '仅在线书籍', migrated: false },
-  { id: 'change_source', label: '换源', glyph: 'swap', scopeLabel: '仅在线书籍', migrated: false },
-  { id: 'refresh', label: '刷新章节', glyph: 'profileRefresh', scopeLabel: '仅在线书籍', migrated: false },
-  { id: 'download', label: '离线缓存', glyph: 'cloudDownload', scopeLabel: '仅在线书籍', migrated: false },
+  { id: 'change_source', label: '换源', glyph: 'swap', scopeLabel: '仅在线书籍', migrated: true },
+  { id: 'refresh', label: '刷新章节', glyph: 'profileRefresh', scopeLabel: '仅在线书籍', migrated: true },
+  { id: 'download', label: '离线缓存', glyph: 'cloudDownload', scopeLabel: '仅在线书籍', migrated: true },
   { id: 'audio_download', label: '听书下载', glyph: 'download', scopeLabel: '', migrated: false },
   // 上游 MoreActionIds 第 10 位 ai_chat。AI 在范围之外（见 docs/PROJECT.md），只入池不实现。
   { id: 'ai_chat', label: 'AI 对话', glyph: 'sparkles', scopeLabel: '', migrated: false },
@@ -131,14 +132,14 @@ const READER_MORE_ACTIONS: ReaderMoreAction[] = [
   { id: 'toc_rule', label: 'TXT 目录规则', glyph: 'profileRule', scopeLabel: '', migrated: true },
   { id: 'charset', label: '设置编码', glyph: 'info', scopeLabel: '', migrated: true },
   { id: 'image_style', label: '图片样式', glyph: 'book', scopeLabel: '', migrated: true },
-  { id: 'page_anim', label: '本书翻页动画', glyph: 'profileSettings', scopeLabel: '', migrated: false },
+  { id: 'page_anim', label: '本书翻页动画', glyph: 'profileSettings', scopeLabel: '', migrated: true },
   { id: 'simulated_reading', label: '模拟追读', glyph: 'book', scopeLabel: '', migrated: true },
   { id: 'get_progress', label: '拉取云端进度', glyph: 'profileHistory', scopeLabel: '', migrated: false },
   { id: 'cover_progress', label: '覆盖云端进度', glyph: 'profileHistory', scopeLabel: '', migrated: false },
   { id: 'highlight_rule', label: '高亮规则', glyph: 'profileRule', scopeLabel: '', migrated: true },
   { id: 'read_style', label: '阅读界面', glyph: 'profileSettings', scopeLabel: '', migrated: true },
   { id: 'bottom_button_config', label: '配置底部按钮', glyph: 'profileSettings', scopeLabel: '', migrated: true },
-  { id: 'log', label: '日志', glyph: 'info', scopeLabel: '', migrated: false }
+  { id: 'log', label: '日志', glyph: 'info', scopeLabel: '', migrated: true }
 ];
 const MORE_ACTION_CONFIG_ENTRY: ReaderMoreAction = {
   id: 'configure_more_actions', label: '配置更多菜单', glyph: 'settings', scopeLabel: '', migrated: true
@@ -604,6 +605,9 @@ export struct ReaderPage {
   @State simReadStartChapterInput: string = '0';
   @State moreActionConfigVisible: boolean = false;
   @State moreActionShellVisible: boolean = false;
+  /** 「日志」面板（上游 AppLogSheet），行取自 AppLog 内存缓冲。 */
+  @State logSheetVisible: boolean = false;
+  @State logEntries: string[] = [];
   @State moreActionShellTitle: string = '';
   /**
    * 批10（:570）长按「换源 / 刷新章节」格子弹出的二级菜单：'' 表示没展开，
@@ -1015,6 +1019,11 @@ export struct ReaderPage {
    * 清掉本章之后的缓存并重拉目录。本地实现在上层。
    */
   onRefreshAfterChapter: () => void = () => {};
+  /**
+   * 「刷新章节」/「刷新」：刷新整本目录（上游 `ReadBookViewModel.loadChapterList`）。
+   * 与「刷新本章」（onRefreshCurrentChapter，重抓这一章正文）是两件事。
+   */
+  onRefreshToc: () => void = () => {};
   onImageStyleChange: (imageStyle: string) => void = (_imageStyle: string) => {};
   onPageAnimationChange: (animation: number) => void = (_animation: number) => {};
   /** 设置当前书的翻页动画（上游 Book.config.pageAnim），由上层落库并回填 selectedBook。 */
@@ -4769,7 +4778,39 @@ export struct ReaderPage {
     else if (kind === 'more_actions') { this.moreActionMenuId = ''; this.overflowVisible = true; }
     else if (kind === 'charset') { this.openCharsetDialog(); }
     else if (kind === 'toc_rule') { this.onOpenTocRule(); }
+    // 底栏/顶栏同样支持书源三件套（上游 ReadMenuActionDefs 与 MoreActionIds 共用同一批动作实现）。
+    else if (kind === 'change_source') { this.onOpenChangeSource(); }
+    else if (kind === 'refresh') { this.onRefreshToc(); }
+    else if (kind === 'refresh_current') { this.onRefreshCurrentChapter(); }
+    else if (kind === 'download') { this.downloadCurrentBook(); }
     else { this.onUnavailableAction(this.getBottomActionLabel(kind) + '功能尚未迁移'); }
+  }
+
+  /**
+   * 「离线缓存」：把整本在线书里**还没缓存**的章节塞进下载队列。
+   *
+   * 对齐上游「缓存整本」：队列自己会跳过已缓存章（ChapterDownloadQueue.enqueue 首行就判
+   * provider.isChapterCached），并且串行、失败不重试（见该文件头部三条边界）。
+   * 这里只负责凑齐章节目录 + 如实回报入队结果，不自己抓正文。
+   */
+  private downloadCurrentBook(): void {
+    if (this.book.isLocal) {
+      this.onUnavailableAction('离线缓存只对在线书籍有效');
+      return;
+    }
+    const chapters = BookRepository.cachedChapters(this.book);
+    if (chapters.length === 0) {
+      this.onUnavailableAction('目录还没加载完成，暂时无法离线缓存');
+      return;
+    }
+    ChapterDownloadQueue.enqueue(this.book, chapters);
+    this.onUnavailableAction('已加入离线缓存队列：' + chapters.length + ' 章');
+  }
+
+  /** 「日志」面板（上游 MoreActionIds.log → AppLogSheet），取 AppLog 内存环形缓冲。 */
+  private openLogSheet(): void {
+    this.logEntries = AppLog.getAll();
+    this.logSheetVisible = true;
   }
 
   /**
@@ -4974,6 +5015,17 @@ export struct ReaderPage {
       this.highlightRuleSheetVisible = true;
     } else if (action.id === 'bottom_button_config') {
       this.onOpenBottomActionConfig();
+    } else if (action.id === 'change_source') {
+      // 上游 MoreActionIds.change_source：整本换源（ChangeSourceSheet），与长按二级菜单的「换源」同一入口。
+      this.onOpenChangeSource();
+    } else if (action.id === 'refresh') {
+      // 上游 MoreActionIds.refresh 走 ReadBookViewModel.loadChapterList：刷新的是**目录**。
+      this.onRefreshToc();
+    } else if (action.id === 'download') {
+      this.downloadCurrentBook();
+    } else if (action.id === 'log') {
+      // 上游 MoreActionIds.log → AppLogSheet（书架页/详情页同一个日志面板）。
+      this.openLogSheet();
     } else {
       const option = this.getMoreAction(action.id);
       this.moreActionShellTitle = option?.label ?? action.label;
@@ -4987,9 +5039,9 @@ export struct ReaderPage {
    * `ReadMenuLongPressMenu.ChangeSource / Refresh` 分派两组：
    * - ChangeSource（:765-772）：换源 `change_origin` / 更换本章源 `chapter_change_source`
    * - Refresh（:776-789）：刷新本章 `menu_refresh_dur` / 刷新后续 `menu_refresh_after`
-   * 本地能真跑的是「换源」「刷新本章」；「更换本章源」「刷新后续」没有对应实现，
-   * 由上层 `onOpenChapterChangeSource` / `onRefreshAfterChapter` 如实提示未迁移，
-   * 这里不伪造成功（任务书验收第 15 条）。
+   * 四项都已接：换源（`onOpenChangeSource` → ChangeSourceSheet）、刷新本章
+   *（`onRefreshCurrentChapter` → 删本章缓存重抓）、刷新后续（`onRefreshAfterChapter` →
+   * 清后续缓存 + 刷目录）；只有「更换本章源」（单章换源面板）仍由上层如实提示未迁移。
    */
   private longPressMenuItems(): string[] {
     if (this.longPressMenuId === 'change_source') {
@@ -5032,6 +5084,40 @@ export struct ReaderPage {
             .onClick(() => this.longPressMenuId = '')
         }.width('100%').justifyContent(FlexAlign.End)
       }.width('78%').padding({ top: 8, bottom: 8 })
+        .backgroundColor(this.themeColorSurfaceSecondary).borderRadius(20)
+    }.width('100%').height('100%')
+  }
+
+  /** 日志面板：与书架页/详情页的日志 Sheet 同一形态，行取自 AppLog 环形缓冲（最新在上）。 */
+  @Builder
+  private readerLogSheet() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column().width('100%').height('100%').backgroundColor('#66000000')
+        .onClick(() => this.logSheetVisible = false)
+      Column() {
+        Row() {
+          Text('日志').fontSize(TITLE_LARGE).fontWeight(FontWeight.Medium).fontColor('#E5E6EB')
+            .layoutWeight(1)
+          Text('清空').fontSize(LABEL_MEDIUM).fontColor('#C6D3FF').padding(6)
+            .onClick(() => { AppLog.clear(); this.logEntries = []; })
+          Text('关闭').fontSize(LABEL_MEDIUM).fontColor('#C7C9D1').padding(6)
+            .onClick(() => this.logSheetVisible = false)
+        }.width('100%').padding({ bottom: 10 })
+        if (this.logEntries.length === 0) {
+          Column() {
+            Text('暂无日志').fontSize(LABEL_MEDIUM).fontColor('#B7B8C1')
+          }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
+        } else {
+          List() {
+            ForEach(this.logEntries, (line: string) => {
+              ListItem() {
+                Text(line).fontSize(LABEL_SMALL).fontColor('#C7C9D1')
+                  .fontFamily('monospace').width('100%')
+              }.padding({ top: 3, bottom: 3 })
+            }, (line: string, index: number) => index.toString())
+          }.layoutWeight(1).width('100%').scrollBar(BarState.Off)
+        }
+      }.width('88%').height('76%').padding(16)
         .backgroundColor(this.themeColorSurfaceSecondary).borderRadius(20)
     }.width('100%').height('100%')
   }
@@ -9286,6 +9372,10 @@ export struct ReaderPage {
 
       if (this.moreActionShellVisible) {
         this.moreActionUnavailableSheet()
+      }
+
+      if (this.logSheetVisible) {
+        this.readerLogSheet()
       }
 
       // 批10（:570）长按换源 / 刷新格子的二级菜单。
