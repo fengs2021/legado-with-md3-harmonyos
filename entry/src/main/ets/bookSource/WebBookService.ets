@@ -4,6 +4,7 @@ import {
   AnalyzeRule, AnalyzeUrl, BookSource, BookSourceScriptRunner, BookUrlResolver, HttpResponse
 } from '@legado/sourceengine';
 import { AppLog } from '../lib/AppLog';
+import { HtmlFormatter } from './HtmlFormatter';
 import { SourceHttp } from './SourceHttp';
 import { RemoteBookDetail, RemoteChapter, SearchBookItem } from './SourceModels';
 
@@ -301,11 +302,56 @@ export class WebBookService {
   static async getContent(source: BookSource, chapterUrl: string): Promise<string> {
     const cr = source.contentRule;
     if (!cr.content) throw new Error('源缺少 ruleContent.content');
-    const fetched = await WebBookService.fetch(source, chapterUrl, '', 1);
-    const resp = fetched.resp;
-    const base = fetched.base;
-    const rule = WebBookService.newRule(resp.body, base, '', 1);
-    const parts = rule.getStringList(cr.content);
-    return parts.join('\n').trim();
+    const segments: string[] = [];
+    const visited: string[] = [];
+    let currentUrl: string = chapterUrl;
+    let guard: number = 0;
+    while (currentUrl.length > 0 && visited.indexOf(currentUrl) < 0 && guard < 20) {
+      visited.push(currentUrl);
+      guard += 1;
+      const fetched = await WebBookService.fetch(source, currentUrl, '', 1);
+      const resp = fetched.resp;
+      const base = fetched.base;
+      const rule = WebBookService.newRule(resp.body, base, '', 1);
+      // 上游 BookContent.kt:242-262：正文规则取一整段字符串，然后
+      // ① formatKeepImg 净化（只留 <img>，其余标签转段落）② HTML 实体反转义。
+      // 少了这一步，@html 取正文的源会把 <br />、&nbsp; 原样送进阅读器，
+      // 实测同一章分页从 9 页涨到 19 页。
+      const rawText = rule.getString(cr.content, false);
+      const text = HtmlFormatter.unescapeHtml(HtmlFormatter.formatKeepImg(rawText, base)).trim();
+      if (text.length > 0) {
+        segments.push(text);
+      }
+      // 上游 BookContent.kt:264-272：按 nextContentUrl 续页，已访问地址去重。
+      if (cr.nextContentUrl.length === 0) {
+        break;
+      }
+      let next: string = '';
+      try {
+        next = rule.getString(cr.nextContentUrl, true);
+      } catch (_) {
+        break;
+      }
+      if (next.length === 0) {
+        break;
+      }
+      currentUrl = BookUrlResolver.resolve(next, base);
+    }
+    let content = segments.join('\n').trim();
+    // 上游 BookContent.kt:174-181：replaceRegex 作用在拼接后的正文上，先逐行 trim。
+    if (cr.replaceRegex.length > 0 && content.length > 0) {
+      const lines: string[] = content.split('\n');
+      for (let index = 0; index < lines.length; index++) {
+        lines[index] = lines[index].trim();
+      }
+      try {
+        const replacer = WebBookService.newRule(lines.join('\n'), chapterUrl, '', 1);
+        const replaced = replacer.getString(cr.replaceRegex);
+        if (replaced.length > 0) { content = replaced; }
+      } catch (e) {
+        AppLog.put('正文 replaceRegex 失败 ' + (e instanceof Error ? e.message : String(e)));
+      }
+    }
+    return content.trim();
   }
 }
