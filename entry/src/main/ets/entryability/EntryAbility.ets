@@ -75,6 +75,9 @@ export default class EntryAbility extends UIAbility {
     // 日志落盘：AppLog 之前只写内存，进程一被杀什么都留不下（闪退无法取证）。
     // attach 必须在任何业务日志之前调用，沙箱目录是 filesDir。
     AppLog.attach(this.context.filesDir);
+    // 开机自检行：app.log 里能看到这一行就说明落盘链路是通的，
+    // 之后任何一次「拉日志是空的」都能立刻定位到 attach/写盘而不是业务没记日志。
+    AppLog.put('[Boot] onCreate filesDir=' + this.context.filesDir);
     // 安装书源引擎的运行时持久化：引擎自己不开库，登录态与书源读取都经这里。
     // 仓储缓存此时可能还没 load（首屏才 load），但 getBookSource 走 getAll 是同步快照，
     // 首次调用发生在用户点搜索之后，那时缓存已就绪。

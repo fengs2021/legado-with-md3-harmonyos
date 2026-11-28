@@ -8,7 +8,6 @@
  * 落盘失败一律静默：日志本身绝不能影响业务。
  */
 import { fileIo } from '@kit.CoreFileKit';
-import { util } from '@kit.ArkTS';
 import hilog from '@ohos.hilog';
 
 export class AppLog {
@@ -53,7 +52,7 @@ export class AppLog {
           const tail = raw.substring(Math.floor(raw.length / 2));
           const writer = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY
             | fileIo.OpenMode.TRUNC);
-          fileIo.writeSync(writer.fd, new util.TextEncoder().encodeInto('[truncated]\n' + tail));
+          fileIo.writeSync(writer.fd, '[truncated]\n' + tail);
           fileIo.closeSync(writer);
         }
       } catch (_) {
@@ -62,7 +61,9 @@ export class AppLog {
       const file = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE
         | fileIo.OpenMode.APPEND);
       try {
-        fileIo.writeSync(file.fd, new util.TextEncoder().encodeInto(line + '\n'));
+        // 直接写字符串：writeSync 接受 string，绕开 TextEncoder 的兼容问题
+        // （encodeInto 在 API 26 已标记废弃，实测这条路径写不出字节，app.log 一直是 0）。
+        fileIo.writeSync(file.fd, line + '\n');
       } finally {
         fileIo.closeSync(file);
       }
