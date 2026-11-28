@@ -7,6 +7,8 @@ import { AppGlyph, AppGlyphName } from '../components/AppGlyph';
 import { BookRepository } from '../data/BookRepository';
 import { ChapterDownloadQueue, DownloadState } from '../bookSource/ChapterDownloadQueue';
 import { ReplaceRuleRepository } from '../data/ReplaceRuleRepository';
+import { TocRefreshOutcome, TocRefreshUseCase } from '../data/TocRefreshUseCase';
+import { AppLog } from '../lib/AppLog';
 import { BODY_SMALL, BODY_SMALL_LINE_HEIGHT, LABEL_LARGE, LABEL_MEDIUM, LABEL_MEDIUM_LINE_HEIGHT, LABEL_SMALL, TITLE_SMALL, TITLE_SMALL_LINE_HEIGHT } from '../components/typography/TypographyTokens';
 
 /** 卡片式菜单的统一宽度，与书架页、详情页同口径。 */
@@ -151,6 +153,16 @@ export struct CatalogPage {
   /** 目录行，打开页面时从 chapters 表读一次；章节已不在 Book 上。 */
   @State chapterRows: BookChapter[] = [];
 
+  /**
+   * 当前阅读章下标的缓存（-1 = 还没算）。
+   *
+   * 原来 book.chapterIndex 为空时，每个渲染的章节行都要调一次 getAllChapters()：
+   * 那个函数会把整本标题重建成一个新数组再 indexOf 线性找——992 章的目录滚动时
+   * 每帧要拷 992 个字符串，GC 抖动就是「目录滑动卡」的直接原因。
+   * 上游 Book.durChapterIndex 是内存字段，不存在按行重算，这里按同样口径只缓存一次。
+   */
+  private resolvedChapterIndex: number = -1;
+
   private downloadUnsubscribe: (() => void) | undefined = undefined;
 
   aboutToAppear(): void {
@@ -244,9 +256,48 @@ export struct CatalogPage {
     if (BookRepository.lastTocError.length > 0) {
       this.onUnavailableAction(`目录加载失败：${BookRepository.lastTocError}`);
     }
+    // 章节行整批换新，按标题反查出来的当前章下标作废。
+    this.resolvedChapterIndex = -1;
     this.rebuildChapterView();
     // 章节行到位后才有下标可比，补算一次下载状态（TXT:343）。
     this.refreshChapterDownloadStates();
+    this.refreshTocInBackground();
+  }
+
+  /**
+   * 目录先用库里的即时显示，网络刷新放到后台补齐。
+   *
+   * 对齐上游 read.kt:1098 的 ReadBook.upToc()：目录页/阅读器打开时读的是 chapters 表，
+   * 只有在「距上次检查超过 10 分钟」（TocRefreshUseCase.needsCheck）时才后台再抓一次，
+   * 抓到的新章数与本地不同才整批换掉列表。这样用户看到目录是零等待的，
+   * 慢的网络请求不再挡在打开目录/打开正文前面。
+   */
+  private refreshTocInBackground(): void {
+    if (!TocRefreshUseCase.needsCheck(this.book)) {
+      return;
+    }
+    const context = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      return;
+    }
+    const bookUrl = this.book.contentPath ?? this.book.androidOriginalPath ?? '';
+    if (bookUrl.length === 0) {
+      return;
+    }
+    TocRefreshUseCase.execute(context, bookUrl).then((outcome: TocRefreshOutcome): void => {
+      const rows = outcome.chapters;
+      // 章数没变就不动列表：换新会让用户正在看的位置跳掉（上游同样是 cList.size > chapterSize 才换）。
+      if (rows.length === 0 || rows.length === this.chapterRows.length) {
+        return;
+      }
+      this.chapterRows = rows;
+      this.resolvedChapterIndex = -1;
+      this.rebuildChapterView();
+      this.refreshChapterDownloadStates();
+    }).catch((error: Error): void => {
+      // 后台刷新失败不影响已经在显示的目录，只记日志。
+      AppLog.put('[Catalog] 后台刷新目录失败 ' + bookUrl + ' ' + error.message);
+    });
   }
 
   private getAllChapters(): string[] {
@@ -255,6 +306,23 @@ export struct CatalogPage {
       titles.push(row.title);
     });
     return titles;
+  }
+
+  /**
+   * 当前阅读章下标：算一次就缓存。
+   *
+   * 对应上游 book.durChapterIndex（内存字段，随时可取）。本地书行里没有该值时
+   * 才需要按标题反查一次，查过就记住，不要每个渲染行都重查。
+   */
+  private getResolvedChapterIndex(): number {
+    const fixed = this.book.chapterIndex;
+    if (fixed !== undefined) {
+      return fixed;
+    }
+    if (this.resolvedChapterIndex < 0) {
+      this.resolvedChapterIndex = this.getAllChapters().indexOf(this.selectedChapter);
+    }
+    return this.resolvedChapterIndex;
   }
 
   /**
@@ -371,7 +439,7 @@ export struct CatalogPage {
    * 与 `themeColorSurfaceTertiary` 两级（见 `data/ThemePalette.ets` 只有 10 个色字段）。
    */
   private isCurrentChapter(chapterIndex: number): boolean {
-    const selectedIndex = this.book.chapterIndex ?? this.getAllChapters().indexOf(this.selectedChapter);
+    const selectedIndex = this.getResolvedChapterIndex();
     return chapterIndex === selectedIndex;
   }
 
@@ -412,7 +480,7 @@ export struct CatalogPage {
 
   /** 当前章节序号，口径与上游 `book.durChapterIndex` 一致。 */
   private getCurrentChapterIndex(): number {
-    return this.book.chapterIndex ?? this.getAllChapters().indexOf(this.selectedChapter);
+    return this.getResolvedChapterIndex();
   }
 
   /** 上游 `item.isDur`：条目所属章节即当前阅读章节。 */
@@ -530,13 +598,13 @@ export struct CatalogPage {
   }
 
   private getCurrentChapterNumber(): number {
-    const index = this.book.chapterIndex ?? this.getAllChapters().indexOf(this.selectedChapter);
+    const index = this.getResolvedChapterIndex();
     return index >= 0 ? index + 1 : 0;
   }
 
   private scrollToCurrentChapter(): void {
     if (this.selectedTab !== 1 || this.hasAutoScrolledCurrentChapter) { return; }
-    const currentChapterIndex = this.book.chapterIndex ?? this.getAllChapters().indexOf(this.selectedChapter);
+    const currentChapterIndex = this.getResolvedChapterIndex();
     const visibleIndex = this.chapterView.findIndex((chapter: CatalogChapter) =>
       chapter.index === currentChapterIndex);
     if (visibleIndex < 0) { return; }
@@ -877,7 +945,7 @@ export struct CatalogPage {
           Text(this.ascending ? '正序' : '倒序')
             .fontSize(LABEL_SMALL).fontColor('#AEB0B9')
           Blank()
-          Text('共 ' + this.getAllChapters().length.toString() + ' 章')
+          Text('共 ' + this.chapterRows.length.toString() + ' 章')
             .fontSize(LABEL_SMALL).fontColor('#AEB0B9')
         }.padding({ left: 16, right: 16, bottom: 7 })
 
@@ -1222,7 +1290,7 @@ export struct CatalogPage {
           .alignItems(HorizontalAlign.Start)
           .layoutWeight(1)
           .margin({ left: 12 })
-          Text(this.getCurrentChapterNumber().toString() + ' / ' + this.getAllChapters().length.toString())
+          Text(this.getCurrentChapterNumber().toString() + ' / ' + this.chapterRows.length.toString())
             .fontSize(LABEL_SMALL)
             .fontColor(this.themeColorTextPrimary)
             .padding({ left: 9, right: 9, top: 6, bottom: 6 })
