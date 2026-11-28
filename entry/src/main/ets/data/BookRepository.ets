@@ -223,6 +223,9 @@ export class BookRepository {
    */
   static lastTocError: string = '';
 
+  /** 在途的目录加载（bookUrl → Promise），对应上游 WebBook.chapterListJobs 的去重表。 */
+  private static chapterLoads: Map<string, Promise<BookChapter[]>> = new Map<string, Promise<BookChapter[]>>();
+
   /** 安装在线书内容提供器（EntryAbility.onCreate 调用，避免 data ↔ bookSource 循环依赖）。 */
   static installOnlineProvider(provider: OnlineBookProvider): void {
     BookRepository.onlineProvider = provider;
@@ -330,7 +333,6 @@ export class BookRepository {
   private static readonly deleteBookSql: string =
     'DELETE FROM `books` WHERE `bookUrl` = ?';
 
-  /** 章节插入语句，18 列全部给值。 */
   /** chapters 表的 18 个列（顺序即绑定值顺序）；列名必须带反引号——index 是 SQLite 关键字。 */
   private static readonly chapterColumns: string =
     '`url`, `title`, `isVolume`, `tocLevel`, `baseUrl`, `bookUrl`, ' +
@@ -1699,6 +1701,34 @@ static saveImportedBooks(context: Context, books: Book[]): Promise<void> {
     BookRepository.chapterCache.set(bookUrl, chapters);
   }
 
+  /**
+   * 在线目录落库后回写书的三个计数：totalChapterNum / lastCheckTime / latestChapterTitle。
+   *
+   * 对应上游 BookChapterList.kt:166-172（totalChapterNum、latestChapterTitle、lastCheckTime 一起写）。
+   * lastCheckTime 必须写：它是刷新的 10 分钟节流依据（ReadBook.kt:1103），
+   * 不写会让「刚抓完」的目录立刻又被后台刷新流程抓一遍。
+   * 同时把内存里的 book 也标上，同一个页面内的 TocRefreshUseCase.needsCheck 才会返回 false。
+   */
+  static async touchTocMeta(context: Context, book: Book, chapters: BookChapter[]): Promise<void> {
+    const bookUrl = book.contentPath ?? book.androidOriginalPath ?? '';
+    if (bookUrl.length === 0 || chapters.length === 0) { return; }
+    const latest = chapters[chapters.length - 1].title;
+    const now = Date.now();
+    book.lastCheckTime = now;
+    book.chapterCount = String(chapters.length);
+    book.latestChapterTitle = latest;
+    try {
+      const store = await RdbStore.getStore(context);
+      await RdbSchema.ensure(store);
+      await store.executeSql(
+        'UPDATE `books` SET `totalChapterNum` = ?, `lastCheckTime` = ?, `latestChapterTitle` = ? ' +
+        'WHERE `bookUrl` = ?',
+        [chapters.length, now, latest, bookUrl]);
+    } catch (error) {
+      AppLog.put(`[BookRepository] 回写目录计数失败: ${error}`);
+    }
+  }
+
   /** 删一本书的全部章节行。外键 CASCADE 在 relationalStore 里实测不生效，删书必须手动调这里。 */
   static async deleteChapters(context: Context, bookUrl: string): Promise<void> {
     if (bookUrl.length === 0) { return; }
@@ -1921,15 +1951,53 @@ static saveImportedBooks(context: Context, books: Book[]): Promise<void> {
   static async loadChapters(context: Context, book: Book): Promise<BookChapter[]> {
     const bookUrl = book.contentPath ?? book.androidOriginalPath ?? '';
     if (bookUrl.length === 0) { return []; }
+    // 同一本书的目录加载合并成一次：上游 WebBook.kt 的 chapterListJobs 就是这个作用。
+    // 打开一本书时书架页与阅读页会各调一次，没有合并就会同时发两个整本目录请求、
+    // 写两遍库（两次删除+插入互相踩），目录越快被重复抓，越容易撞在一起。
+    const inFlight = BookRepository.chapterLoads.get(bookUrl);
+    if (inFlight !== undefined) {
+      return inFlight;
+    }
+    const job = BookRepository.loadChaptersInner(context, book, bookUrl);
+    BookRepository.chapterLoads.set(bookUrl, job);
+    try {
+      return await job;
+    } finally {
+      BookRepository.chapterLoads.delete(bookUrl);
+    }
+  }
+
+  private static async loadChaptersInner(
+    context: Context, book: Book, bookUrl: string
+  ): Promise<BookChapter[]> {
     // 每次加载前清空上次错误，避免上一本的失败提示串到这一本。
     BookRepository.lastTocError = '';
-    // 在线书目录从书源网络抓取（对应上游 loadChapterListAwait 的在线分支）。
+    // 在线书目录：先库后网（对应上游 ReadBookViewModel.loadChapterListAwait 的在线分支）。
     if (BookRepository.isOnlineBook(book)) {
       const provider = BookRepository.onlineProvider;
       if (provider === undefined) { return []; }
+      // ① 目录以库为准。上游用 Room 同步 DAO 直读 chapters 表，页面一开就有目录；
+      //    这里等价地先查 relationalStore。少了这一步，每次打开目录页/阅读器都要重抓整本目录
+      //    （实测 992 章的源站单次要 2~6 秒，正文首屏也被这笔开销拖住）。
+      try {
+        const stored = await BookRepository.getChapterList(context, bookUrl);
+        if (stored.length > 0) {
+          BookRepository.chapterCache.set(bookUrl, stored);
+          return stored;
+        }
+      } catch (error) {
+        AppLog.put(`[BookRepository] 读本地目录失败，转网络: ${error}`);
+      }
+      // ② 库里确实没有（新书，或上次抓取就失败）才联网；抓到就落库，下次直接走 ①。
+      //    上游 loadChapterListAwait 成功后同样 delByBook + insert（整本重建，不做行级 diff）。
       try {
         const remote = await provider.getChapterList(book);
-        BookRepository.chapterCache.set(bookUrl, remote);
+        if (remote.length > 0) {
+          await BookRepository.saveChapters(context, bookUrl, remote);
+          await BookRepository.touchTocMeta(context, book, remote);
+        } else {
+          BookRepository.chapterCache.set(bookUrl, remote);
+        }
         return remote;
       } catch (error) {
         const message = error instanceof Error ? error.message : `${error}`;
@@ -2069,7 +2137,7 @@ static saveImportedBooks(context: Context, books: Book[]): Promise<void> {
     return (book.isLocal ? media | 256 : media) | errorBit | notShelfBit;
   }
 
-  /** 章节行 18 个绑定值，顺序必须与 insertChapterSql 一致。 */
+  /** 章节行 18 个绑定值，顺序必须与 chapterColumns / insertChapterSql 一致。 */
   private static toChapterArgs(bookUrl: string, chapter: BookChapter): relationalStore.ValueType[] {
     return [
       chapter.url,
