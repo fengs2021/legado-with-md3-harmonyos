@@ -296,7 +296,9 @@ export struct SearchPage {
   }
 
   @Builder searchTopActions() {
-    TopBarButton({ icon: 'settings', showDivider: false, onSelect: () => this.onUnavailableAction('搜索设置将在在线书源搜索接入后提供') })
+    // 在线书源搜索已经接入，旧文案「搜索设置将在在线书源搜索接入后提供」是占位期写的，会误导用户以为功能没做。
+    // 真实的缺口是独立的「搜索设置」面板本身（上游 SearchScreen 的设置项），按实际说。
+    TopBarButton({ icon: 'settings', showDivider: false, onSelect: () => this.onUnavailableAction('搜索设置面板尚未接入；书源与精确匹配可在筛选面板里设置') })
     TopBarButton({
       icon: this.exactMatch ? 'searchPrecisionOn' : 'searchPrecisionOff',
       tint: this.exactMatch ? this.themeColorAccent : '',
