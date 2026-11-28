@@ -108,6 +108,32 @@ export class JsRuntime {
         (v: string) => this.timeFormatCall(v, false));
       expr = this.replaceFunctionCalls(expr, 'java.put', (v: string) => this.putVar(v));
       expr = this.replaceFunctionCalls(expr, 'java.get', (v: string) => this.getVarCall(v));
+      // 上游 BaseSource.kt:66-300 的变量与登录态接口。
+      // 引擎没有「按书源持久化登录态」的端口（core/host/SourceEngineHost.ts 只给了 cookie / 限流 /
+      // 脚本执行 / Web 会话 / 诊断五个端口），所以这里用会话变量模拟：同一次运行内读写一致，
+      // 跨运行不保留。目的是让用到这些方法的源**不再整条规则失败**，
+      // 而不是宣称登录态已经落盘——真正持久化要等宿主补端口。
+      expr = this.replaceFunctionCalls(expr, 'java.getVariable', (v: string) => this.getVarCall(v));
+      expr = this.replaceFunctionCalls(expr, 'java.setVariable', (v: string) => this.putVar(v));
+      expr = this.replaceFunctionCalls(expr, 'java.putVariable', (v: string) => this.putVar(v));
+      expr = this.replaceFunctionCalls(expr, 'java.putConcurrent', (v: string) => this.putVar(v));
+      expr = this.replaceFunctionCalls(expr, 'java.getKey', () => this.quoteString(this.getVar('sourceUrl')));
+      expr = this.replaceFunctionCalls(expr, 'java.getHeaderMap', () => this.quoteString(this.getVar('headerMap')));
+      expr = this.replaceFunctionCalls(expr, 'java.getLoginHeader', () => this.quoteString(this.getVar('loginHeader')));
+      expr = this.replaceFunctionCalls(expr, 'java.getLoginHeaderMap', () => this.quoteString(this.getVar('loginHeader')));
+      expr = this.replaceFunctionCalls(expr, 'java.putLoginHeader', (v: string) => this.putSessionValue('loginHeader', v));
+      expr = this.replaceFunctionCalls(expr, 'java.removeLoginHeader', () => this.putSessionValue('loginHeader', ''));
+      expr = this.replaceFunctionCalls(expr, 'java.getLoginInfo', () => this.quoteString(this.getVar('loginInfo')));
+      expr = this.replaceFunctionCalls(expr, 'java.getLoginInfoMap', () => this.quoteString(this.getVar('loginInfo')));
+      expr = this.replaceFunctionCalls(expr, 'java.putLoginInfo', (v: string) => this.putSessionValue('loginInfo', v));
+      expr = this.replaceFunctionCalls(expr, 'java.removeLoginInfo', () => this.putSessionValue('loginInfo', ''));
+      // UI 侧动作（提示/刷新/登录）在纯规则求值里没有承载对象，静默返回空串，不让规则抛错。
+      expr = this.replaceFunctionCalls(expr, 'java.toast', () => '""');
+      expr = this.replaceFunctionCalls(expr, 'java.longToast', () => '""');
+      expr = this.replaceFunctionCalls(expr, 'java.refreshExplore', () => '""');
+      expr = this.replaceFunctionCalls(expr, 'java.refreshJSLib', () => '""');
+      expr = this.replaceFunctionCalls(expr, 'java.login', () => '""');
+      expr = this.replaceFunctionCalls(expr, 'java.log', (v: string) => this.logCall(v));
       expr = this.replaceFunctionCalls(expr, 'java.t2s', (v: string) => this.evalStr(v));
       // All java.* value shims have run by this point, so a remaining `String("…").replace(…)`
       // chain is plain JavaScript over quoted literals. Evaluate it natively BEFORE the String
@@ -745,6 +771,21 @@ export class JsRuntime {
     const value = this.evalStr(args[1] || '');
     if (key) this.setVar(key, value);
     return value;
+  }
+
+  /** java.putLoginHeader / java.putLoginInfo 的公共实现：写会话变量并回传带引号的值。 */
+  private putSessionValue(key: string, rawArgs: string): string {
+    const args = this.splitArgs(rawArgs);
+    const value = this.evalStr(args[0] || '');
+    this.setVar(key, value);
+    return this.quoteString(value);
+  }
+
+  /** java.log(...)：书源调试常用；引擎内没有宿主日志端口，走 console 让 hilog 能抓到。 */
+  private logCall(rawArgs: string): string {
+    const text = this.evalStr(rawArgs);
+    console.info('[SourceJS] ' + text);
+    return '""';
   }
 
   private getVarCall(rawArgs: string): string {
