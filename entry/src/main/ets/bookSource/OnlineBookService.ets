@@ -9,6 +9,7 @@ import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { Book, BookChapter } from '../model/Book';
 import { OnlineBookProvider } from '../data/OnlineBookProvider';
 import { BookSourceRuntime } from './BookSourceRuntime';
+import { HtmlFormatter } from './HtmlFormatter';
 import { RemoteChapter } from './SourceModels';
 
 /** 章节正文缓存根目录（对应上游 book_cache/）。 */
@@ -136,6 +137,20 @@ export class OnlineBookService implements OnlineBookProvider {
     }
   }
 
+  /** 章节缓存落盘：读/写只有这一处口径，净化回写与首次缓存都走它。 */
+  private static writeCacheFile(path: string, text: string): void {
+    try {
+      const handle = fileIo.openSync(path,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(handle.fd, text);
+      } finally {
+        fileIo.closeSync(handle);
+      }
+    } catch (_) {
+    }
+  }
+
   async getContent(book: Book, chapter: BookChapter, allowCache: boolean = true): Promise<string> {
     const file = this.chapterFile(book, chapter);
     // ① 缓存优先：对应上游 BookHelp.getContent 先读 cachedChapterContentFile。
@@ -143,6 +158,16 @@ export class OnlineBookService implements OnlineBookProvider {
       if (fileIo.accessSync(file)) {
         const cached = fileIo.readTextSync(file);
         if (cached.length > 0) {
+          // 旧版本把未净化的 @html 结果直接落盘（满屏 <br />、&nbsp;）。
+          // 命中残留标签就按同一套口径净化并回写，老缓存自己会修好，不用清缓存。
+          if (HtmlFormatter.looksLikeHtml(cached)) {
+            const healed = HtmlFormatter.unescapeHtml(
+              HtmlFormatter.formatKeepImg(cached, chapter.url)).trim();
+            if (healed.length > 0) {
+              OnlineBookService.writeCacheFile(file, healed);
+              return healed;
+            }
+          }
           return cached;
         }
       }
@@ -162,15 +187,7 @@ export class OnlineBookService implements OnlineBookProvider {
     if (!allowCache) {
       return raw;
     }
-    try {
-      const f = fileIo.openSync(file, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      try {
-        fileIo.writeSync(f.fd, raw);
-      } finally {
-        fileIo.closeSync(f);
-      }
-    } catch (_) {
-    }
+    OnlineBookService.writeCacheFile(file, raw);
     return raw;
   }
 }
